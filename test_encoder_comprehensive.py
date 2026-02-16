@@ -11,7 +11,7 @@ import sys
 import time
 
 sys.path.insert(0, '/media/skr/storage/self_driving/TopoDiffuser/models')
-from models.encoder import build_encoder
+from encoder import build_encoder
 
 
 def test_shape_consistency():

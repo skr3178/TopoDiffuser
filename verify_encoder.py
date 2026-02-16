@@ -22,8 +22,8 @@ import argparse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "models"))
-from models.bev_rasterization import BEVRasterizer, load_kitti_lidar
-from models.encoder import build_encoder
+from bev_rasterization import BEVRasterizer, load_kitti_lidar
+from encoder import build_encoder
 from scipy import stats
 
 

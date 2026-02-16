@@ -35,11 +35,11 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent / "models"))
-from models.bev_rasterization import BEVRasterizer, load_kitti_lidar
-from models.encoder import build_encoder
-from models.diffusion import TrajectoryDiffusionModel
-from models.denoising_network import build_denoising_network
-from models.metrics import compute_trajectory_metrics
+from bev_rasterization import BEVRasterizer, load_kitti_lidar
+from encoder import build_encoder
+from diffusion import TrajectoryDiffusionModel
+from denoising_network import build_denoising_network
+from metrics import compute_trajectory_metrics
 
 
 class TrajectoryGenerator:
@@ -71,7 +71,7 @@ class TrajectoryGenerator:
         
         # Build model from config
         if 'config' in checkpoint:
-            from utils.config import ConfigDict
+            from config import ConfigDict
             config = ConfigDict.from_dict(checkpoint['config'])
         else:
             # Default config
@@ -113,7 +113,7 @@ class TrajectoryGenerator:
     
     def _default_config(self):
         """Create default config."""
-        from utils.config import ConfigDict
+        from config import ConfigDict
         return ConfigDict.from_dict({
             'model': {
                 'encoder': {

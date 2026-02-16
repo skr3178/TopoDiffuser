@@ -11,7 +11,7 @@ import sys
 import os
 
 sys.path.insert(0, '/media/skr/storage/self_driving/TopoDiffuser/models')
-from models.bev_rasterization import BEVRasterizer, load_kitti_lidar, extract_trajectory_from_poses
+from bev_rasterization import BEVRasterizer, load_kitti_lidar, extract_trajectory_from_poses
 
 
 def load_kitti_poses(pose_file):

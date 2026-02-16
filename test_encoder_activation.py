@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import sys
 sys.path.insert(0, '/media/skr/storage/self_driving/TopoDiffuser/models')
-from models.encoder import MultimodalEncoder, CBRBlock, CBBlock
+from encoder import MultimodalEncoder, CBRBlock, CBBlock
 
 
 def test_gradient_flow():

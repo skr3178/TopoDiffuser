@@ -28,8 +28,8 @@ from datetime import datetime
 import argparse
 
 sys.path.insert(0, '/media/skr/storage/self_driving/TopoDiffuser/models')
-from models.bev_rasterization import BEVRasterizer, load_kitti_lidar
-from models.encoder import build_encoder
+from bev_rasterization import BEVRasterizer, load_kitti_lidar
+from encoder import build_encoder
 
 
 class KITTITrajectoryDataset(Dataset):

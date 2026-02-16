@@ -11,7 +11,7 @@ import sys
 import os
 
 sys.path.insert(0, '/media/skr/storage/self_driving/TopoDiffuser/models')
-from models.bev_rasterization import BEVRasterizer, load_kitti_lidar
+from bev_rasterization import BEVRasterizer, load_kitti_lidar
 
 
 def point_coverage_metric(points, bev_density, rasterizer):

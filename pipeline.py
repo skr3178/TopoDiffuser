@@ -46,13 +46,13 @@ sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "models"))
 sys.path.insert(0, str(project_root / "utils"))
 
-from utils.config import load_config, override_config, validate_config, get_default_config
-from models.bev_rasterization import BEVRasterizer, load_kitti_lidar
-from models.encoder import build_encoder
-from models.diffusion import TrajectoryDiffusionModel
-from models.denoising_network import build_denoising_network
-from models.losses import TopoDiffuserLoss, get_loss_function
-from models.metrics import compute_trajectory_metrics, MetricsLogger
+from config import load_config, override_config, validate_config, get_default_config
+from bev_rasterization import BEVRasterizer, load_kitti_lidar
+from encoder import build_encoder
+from diffusion import TrajectoryDiffusionModel
+from denoising_network import build_denoising_network
+from losses import TopoDiffuserLoss, get_loss_function
+from metrics import compute_trajectory_metrics, MetricsLogger
 
 
 # =============================================================================
