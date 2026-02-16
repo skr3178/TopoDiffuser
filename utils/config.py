@@ -85,10 +85,15 @@ def load_config(config_path: str, config_dir: str = "configs") -> ConfigDict:
     """
     # Resolve path
     if not os.path.isabs(config_path):
-        # Find config directory relative to project root
+        # Check if config_path already includes the directory
         project_root = Path(__file__).parent.parent
-        config_dir = project_root / config_dir
-        config_path = config_dir / config_path
+        full_config_dir = project_root / config_dir
+        
+        # If path already starts with config_dir, don't add it again
+        if config_path.startswith(config_dir + "/") or config_path.startswith(config_dir + "\\"):
+            config_path = project_root / config_path
+        else:
+            config_path = full_config_dir / config_path
     
     config_path = Path(config_path)
     

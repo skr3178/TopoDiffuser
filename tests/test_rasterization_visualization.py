@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import sys
 sys.path.insert(0, '/media/skr/storage/self_driving/TopoDiffuser/models')
-from bev_rasterization import BEVRasterizer
+from models.bev_rasterization import BEVRasterizer
 
 
 def create_synthetic_scene(scene_type='straight_road'):

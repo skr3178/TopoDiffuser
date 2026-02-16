@@ -47,12 +47,12 @@ sys.path.insert(0, str(project_root / "models"))
 sys.path.insert(0, str(project_root / "utils"))
 
 from utils.config import load_config, override_config, validate_config, get_default_config
-from bev_rasterization import BEVRasterizer, load_kitti_lidar
-from encoder import build_encoder
-from diffusion import TrajectoryDiffusionModel
-from denoising_network import build_denoising_network
-from losses import TopoDiffuserLoss, get_loss_function
-from metrics import compute_trajectory_metrics, MetricsLogger
+from models.bev_rasterization import BEVRasterizer, load_kitti_lidar
+from models.encoder import build_encoder
+from models.diffusion import TrajectoryDiffusionModel
+from models.denoising_network import build_denoising_network
+from models.losses import TopoDiffuserLoss, get_loss_function
+from models.metrics import compute_trajectory_metrics, MetricsLogger
 
 
 # =============================================================================
@@ -408,15 +408,17 @@ class Trainer:
             self.optimizer.zero_grad()
             
             # Forward
-            if self.scaler:
+            if self.config.training.mixed_precision and self.scaler:
                 with autocast('cuda'):
                     outputs = self.model(bev, trajectory, mode='full')
-                    loss, loss_dict = self.criterion(
-                        outputs['predicted_noise'],
-                        outputs['target_noise'],
-                        outputs['road_mask_pred'],
-                        road_mask
-                    )
+                
+                # Compute loss outside autocast (BCE + Sigmoid incompatible with autocast)
+                loss, loss_dict = self.criterion(
+                    outputs['predicted_noise'],
+                    outputs['target_noise'],
+                    outputs['road_mask_pred'],
+                    road_mask
+                )
                 
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
@@ -605,10 +607,16 @@ def main():
         for o in args.override:
             if '=' in o:
                 k, v = o.split('=', 1)
-                try:
-                    v = eval(v)
-                except:
-                    pass
+                # Handle boolean strings
+                if v.lower() == 'true':
+                    v = True
+                elif v.lower() == 'false':
+                    v = False
+                else:
+                    try:
+                        v = eval(v)
+                    except:
+                        pass
                 overrides[k] = v
         config = override_config(config, overrides)
     

@@ -1,32 +1,209 @@
 # LiDAR-Only Ablation Configuration
-# Based on paper Section IV (Ablation Study)
+# Based on TopoDiffuser Paper (arXiv:2508.00303) Section IV-B
+# Adapted for RTX 3060 12GB
 
 # Inherit from default
 base_config: "default.yaml"
 
 project:
   name: "TopoDiffuser-LiDAR-Only"
+  description: "Paper LiDAR-only ablation with RTX 3060 adaptations"
 
+# =============================================================================
+# Data Configuration (Paper Section IV-B)
+# =============================================================================
 data:
   # LiDAR only - no trajectory history or OSM maps
+  train_sequences: ["00", "02", "05", "07"]  # 3,860 training samples
+  val_sequences: ["08", "09", "10"]           # 2,270 test samples
+  test_sequences: ["08", "09", "10"]
+  
   lidar:
     channels: 3  # Height, Intensity, Density only
+    bev_height: 300
+    bev_width: 400
+    x_range: [-20, 20]   # 40m total
+    y_range: [-10, 30]   # 40m total
+    z_range: [-3, 4]     # Keep tall objects
+    resolution: 0.1      # meters per pixel
+  
+  # Trajectory settings (Paper: Tf=8 waypoints at 2m intervals = 16m ahead)
+  trajectory:
+    num_future: 8           # Tf = 8 future waypoints
+    num_past: 5             # Past trajectory (10m at 2m spacing)
+    waypoint_spacing: 2.0   # meters
+    max_distance: 16.0      # 8 × 2m = 16m prediction horizon
+  
+  # Road mask (auxiliary task)
+  road_mask:
+    height: 37
+    width: 50
+    x_range: [-20, 20]
+    y_range: [-10, 30]
+    dilation_iterations: 2
 
+# =============================================================================
+# Model Architecture (Paper Appendix Table I)
+# =============================================================================
 model:
+  name: "TopoDiffuser-LiDAR"
+  
   encoder:
-    input_channels: 3
+    input_channels: 3       # LiDAR only
+    conditioning_dim: 512   # c vector dimension
+    hidden_dims: [32, 64, 128, 256, 512]  # c1-c5
+    decoder_dim: 64         # p4, p5
+    use_batch_norm: true
+    activation: "relu"
+    
+    segmentation_head:
+      enabled: true
+      output_size: [37, 50]
+      intermediate_channels: 64
+    
+    conditioning_head:
+      enabled: true
+      output_dim: 512
+      pool_type: "flatten"
+  
+  # Diffusion Policy (Paper Section III-D, III-E)
+  diffusion:
+    num_timesteps: 10       # N = 10 (paper finds this optimal)
+    beta_schedule: "linear"
+    beta_start: 0.0001      # β_1
+    beta_end: 0.02          # β_T
+    
+    denoising_network:
+      architecture: "mlp"   # "mlp" or "cnn1d"
+      num_waypoints: 8      # Tf
+      coord_dim: 2          # (x, y)
+      hidden_dim: 512       # Hidden layer size
+      num_layers: 4         # Number of FC layers
+      timestep_dim: 256     # Sinusoidal embedding dim
+      conditioning_dim: 512 # From encoder
+      use_film: false
 
+# =============================================================================
+# Training Configuration (Paper Section IV-B)
+# =============================================================================
 training:
-  # Smaller batch size for faster iteration
-  batch_size: 128
-  epochs: 50
+  # Mode: "joint" (end-to-end), "encoder_only", "diffusion_only"
+  mode: "joint"
   
-  # Higher learning rate for ablation
+  # Paper: 120 epochs, batch_size 8 on RTX 4090D 24GB
+  # RTX 3060 12GB adaptation:
+  epochs: 120
+  batch_size: 4               # Reduced from 8
+  grad_accumulation_steps: 2  # Effective batch = 8
+  
+  # DataLoader
+  num_workers: 4              # Adjust based on CPU
+  pin_memory: true
+  persistent_workers: true
+  
+  # Optimizer (Paper: Adam, lr=3×10^-3)
   optimizer:
-    lr: 1.0e-3
+    type: "Adam"              # Paper uses Adam (not AdamW)
+    lr: 0.003                 # 3×10^-3 (paper specification)
+    weight_decay: 0.0         # Not specified in paper
+    betas: [0.9, 0.999]
   
+  # Scheduler (Paper: cosine decay)
+  scheduler:
+    type: "CosineAnnealingLR"
+    T_max: 120                # Match epochs
+    eta_min: 1.0e-6           # Near-zero final LR
+  
+  # Mixed precision (essential for RTX 3060 12GB)
+  mixed_precision: true
+  grad_clip: 1.0
+  
+  # Loss weights (Equation 5: L_total = L_diff + λ_road × L_road)
   loss:
-    alpha_road: 0.1
+    # Paper doesn't specify exact λ; suggested range 0.1-1.0
+    # Schedule: Start high (1.0) for warm-up, reduce to 0.1
+    alpha_road: 0.1           # Default λ_road
+    # Optional: warmup schedule
+    alpha_road_warmup:
+      enabled: false          # Set true to enable warmup
+      warmup_epochs: 30
+      warmup_value: 1.0       # Start at 1.0
+      final_value: 0.1        # End at 0.1
+  
+  # Checkpointing
+  checkpoint:
+    save_every: 10            # Save every 10 epochs
+    keep_best: true
+    keep_latest: true
 
+# =============================================================================
+# Validation / Evaluation
+# =============================================================================
 validation:
+  batch_size: 128             # Can be larger than training (no gradients)
+  num_workers: 4
+  frequency: 1                # Every epoch
+  
+  # Paper metrics: FDE, minADE, HitRate, Hausdorff Distance (HD)
+  metrics:
+    minADE: true
+    minFDE: true
+    maxADE: true
+    HitRate: true
+    Hausdorff: true
+  
+  hitrate_threshold: 2.0      # HitRate@2m
+  
+  # Multimodal sampling (Paper: K=5 samples)
   num_samples: 5
+
+# =============================================================================
+# Inference Configuration
+# =============================================================================
+inference:
+  num_samples: 5              # K=5 (paper default)
+  denoising_steps: 10         # N=10 (can reduce to 5-10 for speed)
+  
+  selection:
+    method: "minADE"          # Select best from K samples
+  
+  visualize:
+    enabled: true
+    save_bev: true
+    save_trajectory: true
+    plot_top_k: 5
+
+# =============================================================================
+# Logging & Monitoring
+# =============================================================================
+logging:
+  level: "INFO"
+  log_to_file: true
+  log_to_console: true
+  tensorboard: true
+  wandb: false
+  log_every_n_steps: 10
+  log_every_n_epochs: 1
+
+# =============================================================================
+# Hardware (RTX 3060 12GB Specific)
+# =============================================================================
+hardware:
+  device: "cuda"
+  gpu_ids: [0]
+  amp: true                   # Automatic Mixed Precision (FP16)
+  cudnn_benchmark: true
+  
+  # Memory optimization
+  gradient_checkpointing: false  # Set true if OOM (trades compute for memory)
+  compile_model: false           # PyTorch 2.0 compile (may use extra memory)
+
+# =============================================================================
+# Early Stopping (Not in paper, but recommended)
+# =============================================================================
+early_stopping:
+  enabled: true
+  monitor: "minADE"           # Monitor validation minADE
+  patience: 20                # Epochs without improvement
+  mode: "min"                 # Lower is better
+  min_delta: 0.001            # Minimum change to qualify as improvement

@@ -36,11 +36,11 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, '/media/skr/storage/self_driving/TopoDiffuser/models')
-from bev_rasterization import BEVRasterizer, load_kitti_lidar
-from encoder import build_encoder
-from diffusion import TrajectoryDiffusionModel
-from denoising_network import build_denoising_network
-from metrics import compute_trajectory_metrics, MetricsLogger, aggregate_metrics
+from models.bev_rasterization import BEVRasterizer, load_kitti_lidar
+from models.encoder import build_encoder
+from models.diffusion import TrajectoryDiffusionModel
+from models.denoising_network import build_denoising_network
+from models.metrics import compute_trajectory_metrics, MetricsLogger, aggregate_metrics
 
 
 # =============================================================================

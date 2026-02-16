@@ -29,12 +29,12 @@ import argparse
 from datetime import datetime
 
 sys.path.insert(0, '/media/skr/storage/self_driving/TopoDiffuser/models')
-from bev_rasterization import BEVRasterizer, load_kitti_lidar
-from encoder import build_encoder
-from diffusion import TrajectoryDiffusionModel
-from denoising_network import build_denoising_network
-from losses import TopoDiffuserLoss
-from metrics import compute_trajectory_metrics, MetricsLogger
+from models.bev_rasterization import BEVRasterizer, load_kitti_lidar
+from models.encoder import build_encoder
+from models.diffusion import TrajectoryDiffusionModel
+from models.denoising_network import build_denoising_network
+from models.losses import TopoDiffuserLoss
+from models.metrics import compute_trajectory_metrics, MetricsLogger
 
 
 class KITTIJointDataset(Dataset):
