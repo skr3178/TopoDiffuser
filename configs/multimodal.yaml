@@ -1,0 +1,32 @@
+# Full Multimodal Configuration
+# LiDAR + Trajectory History + Topometric Map
+
+base_config: "default.yaml"
+
+project:
+  name: "TopoDiffuser-Multimodal"
+
+data:
+  lidar:
+    channels: 5  # LiDAR [3] + Trajectory History [1] + OSM Map [1]
+  
+  # Enable OSM integration
+  osm:
+    enabled: true
+    cache_maps: true
+    road_types: ["primary", "secondary", "residential", "tertiary"]
+    line_thickness: 3  # pixels
+
+model:
+  encoder:
+    input_channels: 5
+
+training:
+  batch_size: 32  # Smaller due to more channels
+  epochs: 50
+  
+  loss:
+    alpha_road: 0.1  # Same weight - road task is still auxiliary
+
+validation:
+  num_samples: 5

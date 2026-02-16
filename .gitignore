@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+
+# Large directories
+checkpoints/
+data/
+cache/
+
+# Model weights
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archives
+*.zip
+*.tar.gz
+*.tar
+
+# Large media (optional - keep smaller result images)
+# Comment out if you want to keep result images
+# *.png
+# *.jpg
+# *.jpeg
+
+# Reference materials (optional)
+reference/
+*.pdf

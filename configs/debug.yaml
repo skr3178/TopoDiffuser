@@ -1,0 +1,39 @@
+# Debug Configuration
+# Fast iteration for testing
+
+base_config: "default.yaml"
+
+project:
+  name: "TopoDiffuser-Debug"
+
+data:
+  # Use only sequence 00, small split
+  train_sequences: ["00"]
+  val_sequences: ["00"]
+  test_sequences: ["00"]
+
+model:
+  diffusion:
+    num_timesteps: 5  # Faster for debugging
+    
+    denoising_network:
+      hidden_dim: 256  # Smaller network
+      num_layers: 2
+
+training:
+  batch_size: 32
+  epochs: 3  # Just a few epochs
+  num_workers: 2
+  
+  optimizer:
+    lr: 1.0e-3
+  
+  mixed_precision: false  # Easier debugging
+
+validation:
+  frequency: 1
+  num_samples: 3  # Fewer samples for speed
+
+logging:
+  level: "DEBUG"
+  log_every_n_steps: 1

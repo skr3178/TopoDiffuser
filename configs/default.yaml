@@ -1,0 +1,212 @@
+# Default Configuration for TopoDiffuser
+# Full pipeline configuration
+
+# =============================================================================
+# Project Settings
+# =============================================================================
+project:
+  name: "TopoDiffuser"
+  version: "1.0.0"
+  description: "Diffusion-Based Multimodal Trajectory Prediction with Topometric Maps"
+  seed: 42
+
+# =============================================================================
+# Paths
+# =============================================================================
+paths:
+  data_root: "/media/skr/storage/self_driving/TopoDiffuser/data/kitti"
+  checkpoint_dir: "/media/skr/storage/self_driving/TopoDiffuser/checkpoints"
+  log_dir: "/media/skr/storage/self_driving/TopoDiffuser/logs"
+  cache_dir: "/media/skr/storage/self_driving/TopoDiffuser/cache"
+  output_dir: "/media/skr/storage/self_driving/TopoDiffuser/outputs"
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+data:
+  # KITTI Sequences
+  train_sequences: ["00", "02", "05", "07"]  # 3,860 samples (paper protocol)
+  val_sequences: ["08", "09", "10"]           # 2,270 samples
+  test_sequences: ["08", "09", "10"]
+  
+  # LiDAR settings
+  lidar:
+    channels: 3  # Height, Intensity, Density
+    bev_height: 300
+    bev_width: 400
+    x_range: [-20, 20]  # meters (40m total)
+    y_range: [-10, 30]  # meters (40m total)
+    z_range: [-3, 4]    # meters (keep tall objects)
+    resolution: 0.1     # meters per pixel
+  
+  # Trajectory settings
+  trajectory:
+    num_future: 8       # waypoints
+    num_past: 5         # keyframes (for multimodal)
+    waypoint_spacing: 2.0  # meters between waypoints
+    max_distance: 16.0  # meters (8 waypoints * 2m)
+  
+  # Road mask settings (for segmentation head)
+  road_mask:
+    height: 37
+    width: 50
+    x_range: [-20, 20]
+    y_range: [-10, 30]
+    dilation_iterations: 2
+
+# =============================================================================
+# Model Architecture
+# =============================================================================
+model:
+  name: "TopoDiffuser"
+  
+  # Encoder (Block 2)
+  encoder:
+    input_channels: 3   # LiDAR only: 3, Full: 5 (LiDAR + Traj + Map)
+    conditioning_dim: 512
+    hidden_dims: [32, 64, 128, 256, 512]  # c1-c5
+    decoder_dim: 64     # p4, p5
+    use_batch_norm: true
+    activation: "relu"
+    
+    # Dual heads from p4
+    segmentation_head:
+      enabled: true
+      output_size: [37, 50]
+      intermediate_channels: 64
+    
+    conditioning_head:
+      enabled: true
+      output_dim: 512
+      pool_type: "flatten"  # or "avg", "max"
+  
+  # Diffusion Policy (Block 4)
+  diffusion:
+    num_timesteps: 10
+    beta_schedule: "linear"
+    beta_start: 0.0001
+    beta_end: 0.02
+    
+    # Denoising network g_φ
+    denoising_network:
+      architecture: "mlp"  # "mlp" or "cnn1d"
+      num_waypoints: 8
+      coord_dim: 2
+      hidden_dim: 512
+      num_layers: 4
+      timestep_dim: 256
+      conditioning_dim: 512
+      use_film: false  # For CNN variant
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+training:
+  # Mode: "joint" (encoder+diffusion) or "separate" (stage-wise)
+  mode: "joint"
+  
+  # General
+  batch_size: 64
+  epochs: 50
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  
+  # Optimizer
+  optimizer:
+    type: "AdamW"
+    lr: 1.0e-4
+    weight_decay: 1.0e-4
+    betas: [0.9, 0.999]
+  
+  # Scheduler
+  scheduler:
+    type: "CosineAnnealingLR"
+    T_max: 50  # Should match epochs
+    eta_min: 1.0e-6
+  
+  # Mixed precision
+  mixed_precision: true
+  grad_clip: 1.0
+  
+  # Loss weights (Equation 5)
+  loss:
+    alpha_road: 0.1      # Weight for L_road
+    diffusion_weight: 1.0
+    segmentation_weight: 1.0
+    
+    # Optional: Learned uncertainty weighting
+    use_uncertainty_weighting: false
+  
+  # Checkpointing
+  checkpoint:
+    save_every: 5        # Save every N epochs
+    keep_best: true
+    keep_latest: true
+
+# =============================================================================
+# Validation/Evaluation
+# =============================================================================
+validation:
+  batch_size: 128
+  num_workers: 4
+  frequency: 1          # Validate every N epochs
+  
+  # Metrics
+  metrics:
+    minADE: true
+    minFDE: true
+    maxADE: true
+    HitRate: true
+    Hausdorff: true
+  
+  # HitRate threshold
+  hitrate_threshold: 2.0  # meters
+  
+  # Number of samples for multimodal evaluation
+  num_samples: 5  # K=5 as per paper
+
+# =============================================================================
+# Inference Configuration
+# =============================================================================
+inference:
+  num_samples: 5        # K trajectory samples
+  denoising_steps: 10   # N steps (can reduce to 5-10 for speed)
+  
+  # Selection strategy
+  selection:
+    method: "minADE"    # Select best from K samples
+    # Alternative: "ensemble" (average K samples)
+  
+  # Visualization
+  visualize:
+    enabled: true
+    save_bev: true
+    save_trajectory: true
+    plot_top_k: 5
+
+# =============================================================================
+# Logging
+# =============================================================================
+logging:
+  level: "INFO"
+  log_to_file: true
+  log_to_console: true
+  
+  # TensorBoard/WandB
+  tensorboard: true
+  wandb: false
+  wandb_project: "topodiffuser"
+  
+  # Frequency
+  log_every_n_steps: 10
+  log_every_n_epochs: 1
+
+# =============================================================================
+# Hardware
+# =============================================================================
+hardware:
+  device: "cuda"        # "cuda" or "cpu"
+  gpu_ids: [0]          # Multi-GPU: [0, 1, 2, 3]
+  amp: true             # Automatic Mixed Precision
+  cudnn_benchmark: true

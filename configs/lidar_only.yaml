@@ -1,0 +1,32 @@
+# LiDAR-Only Ablation Configuration
+# Based on paper Section IV (Ablation Study)
+
+# Inherit from default
+base_config: "default.yaml"
+
+project:
+  name: "TopoDiffuser-LiDAR-Only"
+
+data:
+  # LiDAR only - no trajectory history or OSM maps
+  lidar:
+    channels: 3  # Height, Intensity, Density only
+
+model:
+  encoder:
+    input_channels: 3
+
+training:
+  # Smaller batch size for faster iteration
+  batch_size: 128
+  epochs: 50
+  
+  # Higher learning rate for ablation
+  optimizer:
+    lr: 1.0e-3
+  
+  loss:
+    alpha_road: 0.1
+
+validation:
+  num_samples: 5
