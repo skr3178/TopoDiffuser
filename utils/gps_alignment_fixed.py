@@ -185,7 +185,12 @@ def compute_gps_alignment_fixed(sequence: str,
     
     # Load poses
     poses_path = Path(data_root) / 'poses' / f'{sequence}.txt'
-    poses = np.loadtxt(poses_path)[:len(gps_coords)]
+    poses = np.loadtxt(poses_path)
+    
+    # Match lengths - sometimes OXTS and poses have different counts
+    min_frames = min(len(gps_coords), len(poses))
+    gps_coords = gps_coords[:min_frames]
+    poses = poses[:min_frames]
     
     # Extract local coords (x, z) - NOT (x, y)!
     local_coords = []
