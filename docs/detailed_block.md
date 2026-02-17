@@ -633,3 +633,7 @@ Training for 5-10 epochs and checking if the segmentation head (BCE loss) conver
 Visualizing the predicted road masks—they should align with actual drivable areas despite the low c5 std
 Checking if the diffusion loss decreases (indicating the conditioning vector c  carries useful information)
 If both losses drop, the architecture is working perfectly—the low variance in c5 is a feature, not a bug.
+
+
+BCEWithLogitsLoss combines sigmoid + binary_cross_entropy into a single operation that uses the log-sum-exp trick, preventing the intermediate values from underflowing/overflowing in FP16.
+Bottom line: Delete nn.Sigmoid() from your segmentation head, use nn.BCEWithLogitsLoss() instead of nn.BCELoss(), and your FP16 training on the RTX 3060 will work without this error.
