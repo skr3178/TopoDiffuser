@@ -109,8 +109,10 @@ def precompute_conditioning(encoder, encoder_ckpt, sequences, data_root,
     if os.path.exists(cache_path):
         print(f"  Loading cached conditioning from {cache_path}")
         data = torch.load(cache_path, map_location='cpu', weights_only=True)
-        print(f"  {data['conditioning'].shape[0]} samples loaded from cache")
-        return data['conditioning'], data['trajectories']
+        cond = data['conditioning'].float()  # Ensure float32
+        traj = data['trajectories'].float()
+        print(f"  {cond.shape[0]} samples loaded from cache (dtype={cond.dtype})")
+        return cond, traj
 
     print(f"  Precomputing conditioning vectors (one-time cost)...")
     samples = _collect_samples(sequences, data_root)
@@ -139,7 +141,7 @@ def precompute_conditioning(encoder, encoder_ckpt, sequences, data_root,
         with torch.no_grad(), autocast('cuda'):
             cond, _ = encoder(bev_batch)
 
-        all_cond.append(cond.cpu())
+        all_cond.append(cond.float().cpu())  # Ensure float32 (autocast produces float16)
         all_traj.append(torch.stack(batch_trajs))
 
         done = end
@@ -166,7 +168,8 @@ def precompute_conditioning(encoder, encoder_ckpt, sequences, data_root,
 # Training / Validation
 # ---------------------------------------------------------------------------
 
-def train_epoch(diffusion_model, dataloader, optimizer, scaler, device, epoch):
+def train_epoch(diffusion_model, dataloader, optimizer, scaler, device, epoch,
+                max_grad_norm=1.0):
     diffusion_model.train()
     total_loss = 0.0
     num_batches = 0
@@ -187,6 +190,9 @@ def train_epoch(diffusion_model, dataloader, optimizer, scaler, device, epoch):
             loss = nn.functional.mse_loss(predicted_noise, noise)
 
         scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(diffusion_model.denoising_network.parameters(),
+                                       max_grad_norm)
         scaler.step(optimizer)
         scaler.update()
 
@@ -238,7 +244,8 @@ def main():
     parser.add_argument('--encoder_ckpt', type=str, default='checkpoints/encoder_full_best.pth')
     parser.add_argument('--epochs', type=int, default=120)
     parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--lr', type=float, default=3e-3)
+    parser.add_argument('--lr', type=float, default=1e-4,
+                        help='Learning rate (1e-4 recommended for denoiser-only)')
     parser.add_argument('--train_sequences', type=str, nargs='+',
                         default=['00', '02', '05', '07'])
     parser.add_argument('--val_sequences', type=str, nargs='+', default=['08'])
@@ -246,6 +253,9 @@ def main():
     parser.add_argument('--save_dir', type=str, default='checkpoints')
     parser.add_argument('--cache_dir', type=str, default='checkpoints/cache')
     parser.add_argument('--denoiser_arch', type=str, default='unet')
+    parser.add_argument('--noise_schedule', type=str, default='cosine',
+                        choices=['cosine', 'linear'],
+                        help='Noise schedule (cosine required for T=10)')
     parser.add_argument('--precompute_batch', type=int, default=16,
                         help='Batch size for precomputing conditioning (higher = faster)')
     args = parser.parse_args()
@@ -330,8 +340,12 @@ def main():
         args.denoiser_arch, num_waypoints=8, coord_dim=2,
         conditioning_dim=512, timestep_dim=256
     ).to(device)
-    diffusion_model = TrajectoryDiffusionModel(denoising_net, num_timesteps=10, device=device)
+    diffusion_model = TrajectoryDiffusionModel(
+        denoising_net, num_timesteps=10, schedule=args.noise_schedule, device=device)
     print(f"  Denoiser: {sum(p.numel() for p in denoising_net.parameters()):,} params")
+    print(f"  Noise schedule: {args.noise_schedule}")
+    print(f"  alphas_cumprod[T]: {diffusion_model.scheduler.alphas_cumprod[-1]:.4f} "
+          f"(signal at final step: {diffusion_model.scheduler.alphas_cumprod[-1].sqrt():.2%})")
 
     optimizer = optim.Adam(denoising_net.parameters(), lr=args.lr, betas=(0.9, 0.999))
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)

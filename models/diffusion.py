@@ -14,35 +14,54 @@ Section III-D, III-E
 import torch
 import torch.nn as nn
 import numpy as np
+import math
+
+
+def cosine_beta_schedule(num_timesteps, s=0.008):
+    """
+    Cosine noise schedule (Nichol & Dhariwal, 2021).
+
+    Critical for few-step diffusion (T=10). A linear schedule with
+    beta_end=0.02 only destroys ~10% of signal at T=10, making inference
+    start from near-pure noise while training sees near-clean data.
+    The cosine schedule ensures ~100% noise at the final step.
+    """
+    steps = torch.linspace(0, num_timesteps, num_timesteps + 1)
+    alphas_cumprod = torch.cos(((steps / num_timesteps) + s) / (1 + s) * math.pi / 2) ** 2
+    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+    return torch.clip(betas, 0.0001, 0.999)
 
 
 class DiffusionScheduler:
     """
     Noise schedule for diffusion process.
-    
-    Uses linear beta schedule (standard DDPM).
-    β_t increases linearly from beta_start to beta_end.
+
+    Supports 'cosine' (default, recommended for T=10) and 'linear' schedules.
     """
-    
-    def __init__(self, num_timesteps=10, beta_start=0.0001, beta_end=0.02, device='cuda'):
+
+    def __init__(self, num_timesteps=10, beta_start=0.0001, beta_end=0.02,
+                 schedule='cosine', device='cuda'):
         self.num_timesteps = num_timesteps
-        self.beta_start = beta_start
-        self.beta_end = beta_end
         self.device = device
-        
-        # Linear schedule: beta_t increases linearly
-        self.betas = torch.linspace(beta_start, beta_end, num_timesteps, device=device)
-        
+
+        if schedule == 'cosine':
+            self.betas = cosine_beta_schedule(num_timesteps).to(device)
+        elif schedule == 'linear':
+            self.betas = torch.linspace(beta_start, beta_end, num_timesteps, device=device)
+        else:
+            raise ValueError(f"Unknown schedule: {schedule}. Use 'cosine' or 'linear'.")
+
         # α_t = 1 - β_t
         self.alphas = 1.0 - self.betas
-        
+
         # ᾱ_t = cumulative product of α_i from i=1 to t
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
-        
+
         # Precompute values for efficiency
         self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
         self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alphas_cumprod)
-        
+
         # For reverse process
         self.sqrt_recip_alphas = torch.sqrt(1.0 / self.alphas)
         self.alphas_cumprod_prev = torch.cat([
@@ -174,12 +193,14 @@ class TrajectoryDiffusionModel(nn.Module):
     - Denoising network g_φ
     """
     
-    def __init__(self, denoising_network, num_timesteps=10, 
-                 beta_start=0.0001, beta_end=0.02, device='cuda'):
+    def __init__(self, denoising_network, num_timesteps=10,
+                 beta_start=0.0001, beta_end=0.02, schedule='cosine',
+                 device='cuda'):
         super().__init__()
-        
+
         self.denoising_network = denoising_network
-        self.scheduler = DiffusionScheduler(num_timesteps, beta_start, beta_end, device)
+        self.scheduler = DiffusionScheduler(num_timesteps, beta_start, beta_end,
+                                            schedule=schedule, device=device)
         self.timestep_embedding = SinusoidalTimestepEmbedding(embedding_dim=256)
         self.num_timesteps = num_timesteps
         self.device = device
