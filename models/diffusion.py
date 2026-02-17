@@ -299,7 +299,10 @@ class TrajectoryDiffusionModel(nn.Module):
 
 
 # Import metrics from metrics module
-from metrics import compute_minADE
+try:
+    from .metrics import compute_minADE
+except ImportError:
+    from metrics import compute_minADE
 
 
 if __name__ == "__main__":

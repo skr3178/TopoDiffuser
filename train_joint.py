@@ -205,22 +205,17 @@ def train_epoch(encoder, diffusion_model, dataloader, criterion, optimizer, scal
             conditioning, pred_road_mask = encoder(bev)  # [B, 512], [B, 1, 37, 50]
             
             # Diffusion forward
-            # Sample timesteps and noise
             batch_size = trajectory.shape[0]
             t = diffusion_model.scheduler.sample_timesteps(batch_size)
             noise = torch.randn_like(trajectory)
             x_t, _ = diffusion_model.forward_diffusion(trajectory, t, noise)
-            
-            # Get timestep embeddings
             t_emb = diffusion_model.timestep_embedding(t)
-            
-            # Predict noise
             predicted_noise = diffusion_model.denoising_network(x_t, conditioning, t_emb)
             
-            # Combined loss
+            # Compute loss (BCEWithLogitsLoss is safe for autocast)
             loss, loss_dict = criterion(predicted_noise, noise, pred_road_mask, road_mask)
         
-        # Backward
+        # Backward with scaler for FP16
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -243,7 +238,7 @@ def train_epoch(encoder, diffusion_model, dataloader, criterion, optimizer, scal
 
 
 @torch.no_grad()
-def validate(encoder, diffusion_model, dataloader, criterion, device):
+def validate(encoder, diffusion_model, dataloader, criterion, device, debug=True):
     """Validation with combined loss and metrics."""
     encoder.eval()
     diffusion_model.eval()
@@ -252,13 +247,47 @@ def validate(encoder, diffusion_model, dataloader, criterion, device):
     metrics_logger = MetricsLogger()
     num_batches = 0
     
-    for bev, trajectory, road_mask in dataloader:
+    for batch_idx, (bev, trajectory, road_mask) in enumerate(dataloader):
         bev = bev.to(device, non_blocking=True)
         trajectory = trajectory.to(device, non_blocking=True)
         road_mask = road_mask.to(device, non_blocking=True)
         
+        # DEBUG: Check first batch
+        if debug and batch_idx == 0:
+            print("\n" + "="*70)
+            print("DEBUG: Validation Batch 0")
+            print("="*70)
+            
+            # DEBUG 1: GT range
+            print(f"\n[1] GT Trajectory:")
+            print(f"    Shape: {trajectory.shape}")
+            print(f"    Range: [{trajectory.min():.3f}, {trajectory.max():.3f}] meters")
+            print(f"    Mean: {trajectory.mean():.3f}, Std: {trajectory.std():.3f}")
+            print(f"    First sample: {trajectory[0, 0].cpu().numpy()} (start)")
+            print(f"    First sample: {trajectory[0, -1].cpu().numpy()} (end)")
+        
         # Encoder
         conditioning, pred_road_mask = encoder(bev)
+        
+        if debug and batch_idx == 0:
+            # DEBUG 2: Conditioning variance
+            print(f"\n[2] Conditioning Vector:")
+            print(f"    Shape: {conditioning.shape}")
+            print(f"    Range: [{conditioning.min():.3f}, {conditioning.max():.3f}]")
+            print(f"    Per-dim std: {conditioning.std(dim=0).mean():.4f}")
+            print(f"    Overall std: {conditioning.std():.4f}")
+            
+            # Check if different samples have different conditioning
+            if conditioning.shape[0] > 1:
+                c0, c1 = conditioning[0], conditioning[1]
+                cosine_sim = torch.nn.functional.cosine_similarity(c0.unsqueeze(0), c1.unsqueeze(0)).item()
+                l2_dist = torch.norm(c0 - c1).item()
+                print(f"    Cosine sim (sample 0 vs 1): {cosine_sim:.4f}")
+                print(f"    L2 distance (sample 0 vs 1): {l2_dist:.4f}")
+                if cosine_sim > 0.99:
+                    print("    ⚠️ WARNING: Conditioning collapsed! Samples are identical.")
+                else:
+                    print("    ✓ Conditioning diverse.")
         
         # Diffusion
         batch_size = trajectory.shape[0]
@@ -274,6 +303,28 @@ def validate(encoder, diffusion_model, dataloader, criterion, device):
         
         # Sample and compute trajectory metrics
         pred_trajectories = diffusion_model.sample(conditioning, num_samples=5)
+        
+        if debug and batch_idx == 0:
+            # DEBUG 3 & 4: Check predictions
+            print(f"\n[3] Predicted Trajectories:")
+            print(f"    Shape: {pred_trajectories.shape}")
+            print(f"    Range: [{pred_trajectories.min():.3f}, {pred_trajectories.max():.3f}] meters")
+            print(f"    Mean: {pred_trajectories.mean():.3f}, Std: {pred_trajectories.std():.3f}")
+            print(f"    First sample (K=0): {pred_trajectories[0, 0, 0].cpu().numpy()} (start)")
+            print(f"    First sample (K=0): {pred_trajectories[0, 0, -1].cpu().numpy()} (end)")
+            
+            # DEBUG 5: Compare pred vs GT
+            print(f"\n[4] Pred vs GT Comparison (first sample):")
+            print(f"    GT:    {trajectory[0, :, :].cpu().numpy()}")
+            print(f"    Pred:  {pred_trajectories[0, 0, :, :].cpu().numpy()}")
+            
+            # L2 distance
+            dist = torch.norm(pred_trajectories[0, 0] - trajectory[0], dim=-1)
+            print(f"    Per-waypoint L2 distance: {dist.cpu().numpy()}")
+            print(f"    Mean L2 distance: {dist.mean():.3f}m")
+            
+            print("\n" + "="*70)
+        
         metrics = compute_trajectory_metrics(pred_trajectories, trajectory, threshold=2.0)
         metrics_logger.update(metrics, count=trajectory.shape[0])
         
@@ -286,13 +337,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--lr', type=float, default=3e-3, help='Initial learning rate (paper: 3e-3)')
     parser.add_argument('--alpha_road', type=float, default=0.1, 
                         help='Weight for road segmentation loss (Equation 5)')
-    parser.add_argument('--sequences', type=str, nargs='+', default=['00'])
+    parser.add_argument('--train_sequences', type=str, nargs='+', 
+                        default=['00', '02', '05', '07'],
+                        help='Training sequences (paper: 00,02,05,07)')
+    parser.add_argument('--val_sequences', type=str, nargs='+',
+                        default=['08'],
+                        help='Validation sequence (paper: 08,09,10 - use 08 for val)')
+    parser.add_argument('--sequences', type=str, nargs='+', default=None,
+                        help='[Deprecated] Use --train_sequences and --val_sequences')
     parser.add_argument('--workers', type=int, default=8)
     parser.add_argument('--save_dir', type=str, default='checkpoints')
-    parser.add_argument('--denoiser_arch', type=str, default='mlp')
+    parser.add_argument('--denoiser_arch', type=str, default='unet',
+                        help="Denoiser architecture: 'mlp', 'cnn1d', or 'unet' (paper default)")
+    parser.add_argument('--encoder_ckpt', type=str, default=None,
+                        help='Pretrained encoder checkpoint to load (optional)')
     args = parser.parse_args()
     
     os.makedirs(args.save_dir, exist_ok=True)
@@ -310,6 +371,20 @@ def main():
     # Models
     print("\nBuilding models...")
     encoder = build_encoder(input_channels=3, conditioning_dim=512).to(device)
+    
+    # Load pretrained encoder
+    if args.encoder_ckpt and os.path.exists(args.encoder_ckpt):
+        checkpoint = torch.load(args.encoder_ckpt, map_location=device, weights_only=False)
+        if 'model_state_dict' in checkpoint:
+            encoder.load_state_dict(checkpoint['model_state_dict'])
+        elif 'encoder_state_dict' in checkpoint:
+            encoder.load_state_dict(checkpoint['encoder_state_dict'])
+        else:
+            encoder.load_state_dict(checkpoint)
+        print(f"  ✓ Loaded encoder from {args.encoder_ckpt}")
+    else:
+        print(f"  ⚠ No encoder checkpoint found, starting from scratch")
+    
     denoising_net = build_denoising_network(
         args.denoiser_arch, num_waypoints=8, coord_dim=2,
         conditioning_dim=512, timestep_dim=256
@@ -325,18 +400,20 @@ def main():
     # Loss
     criterion = TopoDiffuserLoss(alpha_road=args.alpha_road)
     
-    # Optimizer (train both encoder and diffusion)
-    optimizer = optim.AdamW(
+    # Optimizer: Adam with cosine decay (paper Section IV-B)
+    optimizer = optim.Adam(
         list(encoder.parameters()) + list(denoising_net.parameters()),
-        lr=args.lr, weight_decay=1e-4
+        lr=args.lr, betas=(0.9, 0.999)
     )
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     scaler = GradScaler()
     
     # Data
     print("\nLoading datasets...")
-    train_dataset = KITTIJointDataset(sequences=args.sequences, split='train')
-    val_dataset = KITTIJointDataset(sequences=args.sequences, split='val')
+    train_dataset = KITTIJointDataset(sequences=args.train_sequences, split='train')
+    val_dataset = KITTIJointDataset(sequences=args.val_sequences, split='all')  # Use all of val sequence
+    print(f"  Train sequences: {args.train_sequences}")
+    print(f"  Val sequences: {args.val_sequences}")
     
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
@@ -348,6 +425,26 @@ def main():
     )
     
     print(f"Train: {len(train_loader)} batches, Val: {len(val_loader)} batches")
+    
+    # DEBUG: Check coordinate system
+    print("\n" + "="*70)
+    print("DEBUG: Checking coordinate system...")
+    sample_batch = next(iter(train_loader))
+    sample_traj = sample_batch[1]  # (bev, trajectory, road_mask) tuple
+    print(f"Trajectory shape: {sample_traj.shape}")
+    print(f"Trajectory range: [{sample_traj.min():.3f}, {sample_traj.max():.3f}] meters")
+    print(f"Trajectory mean: {sample_traj.mean():.3f}, std: {sample_traj.std():.3f}")
+    print(f"Sample trajectory (first): {sample_traj[0].numpy()}")
+    
+    # Check if values are in meters (should be roughly 0-16 for 8 waypoints at 2m spacing)
+    max_val = sample_traj.abs().max().item()
+    if max_val > 100:
+        print("⚠️ WARNING: Trajectory values very large (>100). May be in wrong units!")
+    elif max_val < 1:
+        print("⚠️ WARNING: Trajectory values very small (<1). May be normalized!")
+    else:
+        print(f"✓ Trajectory scale looks correct (~{max_val:.1f}m max)")
+    print("="*70)
     
     # Training loop
     history = {
@@ -385,7 +482,9 @@ def main():
         print(f"  Val: Loss={val_loss:.4f} | "
               f"minADE={val_metrics['minADE']:.3f}m | "
               f"minFDE={val_metrics['minFDE']:.3f}m | "
-              f"HitRate={val_metrics['hit_rate']:.3f}")
+              f"maxADE={val_metrics['maxADE']:.3f}m | "
+              f"HitRate={val_metrics['hit_rate']:.3f} | "
+              f"HD={val_metrics['hausdorff']:.3f}m")
         print(f"  LR: {current_lr:.6f}")
         
         # Save best
@@ -409,8 +508,29 @@ def main():
             'history': history
         }, os.path.join(args.save_dir, 'joint_latest.pth'))
         
+        # Save periodic checkpoint every 10 epochs
+        if epoch % 10 == 0:
+            torch.save({
+                'epoch': epoch,
+                'encoder_state_dict': encoder.state_dict(),
+                'denoiser_state_dict': denoising_net.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_metrics': val_metrics,
+                'history': history
+            }, os.path.join(args.save_dir, f'joint_epoch_{epoch:03d}.pth'))
+            print(f"  ✓ Periodic checkpoint saved (epoch {epoch})")
+        
         with open(os.path.join(args.save_dir, 'joint_history.json'), 'w') as f:
-            json.dump(history, f, indent=2)
+            # Convert numpy types to Python native types for JSON serialization
+            def convert(obj):
+                if isinstance(obj, dict):
+                    return {k: convert(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert(item) for item in obj]
+                elif hasattr(obj, 'item'):  # numpy scalar
+                    return obj.item()
+                return obj
+            json.dump(convert(history), f, indent=2)
     
     print("\n" + "=" * 70)
     print(f"COMPLETE | Best minADE: {best_minADE:.3f}m")

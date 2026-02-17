@@ -111,24 +111,18 @@ class BEVRasterizer:
         z_vals = points_xy_filtered[:, 2] if points_xy_filtered.shape[1] >= 3 else np.zeros(len(points_xy_filtered))
         intensity_vals = points_xy_filtered[:, 3] if points_xy_filtered.shape[1] >= 4 else np.zeros(len(points_xy_filtered))
         
-        # FIX 2: Track min/max Z for adaptive normalization
-        z_min_observed = z_vals.min() if len(z_vals) > 0 else self.z_range[0]
-        z_max_observed = z_vals.max() if len(z_vals) > 0 else self.z_range[1]
-        
-        # Aggregate per cell using numpy advanced indexing
-        for i in range(len(points_xy_filtered)):
-            u, v = px[i], py[i]
-            
-            # FIX 3: Store raw Z for height channel (don't filter by z_range)
-            # Height channel: max pooling (preserves elevated objects)
-            if z_vals[i] > bev[0, v, u]:
-                bev[0, v, u] = z_vals[i]
-            
-            # Intensity channel: sum for averaging later
-            bev[1, v, u] += intensity_vals[i]
-            
-            # Density channel: count points
-            bev[2, v, u] += 1
+        # Vectorized aggregation (replaces slow Python for-loop)
+        # Height channel: max pooling per cell
+        # Initialize to -inf so np.maximum.at works correctly
+        bev[0, :, :] = -np.inf
+        np.maximum.at(bev[0], (py, px), z_vals)
+        bev[0][bev[0] == -np.inf] = 0  # Reset empty cells to 0
+
+        # Intensity channel: sum for averaging later
+        np.add.at(bev[1], (py, px), intensity_vals)
+
+        # Density channel: count points per cell
+        np.add.at(bev[2], (py, px), 1)
         
         # Step 4: Post-processing and normalization
         # Normalize intensity by density (average)

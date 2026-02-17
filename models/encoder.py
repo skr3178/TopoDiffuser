@@ -101,19 +101,20 @@ class MultimodalEncoder(nn.Module):
         # ========== DUAL HEADS FROM P4 (SHARED BACKBONE) ==========
         # Diagram: p4 ──→ CB Blocks ──→ Conv+Sigmoid ──→ branches
         
-        # Shared backbone: CB Blocks → Conv+Sigmoid
+        # Shared backbone: CB Blocks → Conv+BN (no sigmoid here;
+        # BCEWithLogitsLoss handles sigmoid internally for the seg head,
+        # and the conditioning head uses its own ReLU activation)
         self.shared_backbone = nn.Sequential(
             # CB Blocks (multiple)
             CBBlock(64, 64, kernel_size=3, stride=1, padding=1),
             CBBlock(64, 64, kernel_size=3, stride=1, padding=1),
-            # Conv + Sigmoid
+            # Conv + BN (activation applied per-head, not here)
             nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(64),
-            nn.Sigmoid()
         )
         
         # Head A: Road Segmentation (Auxiliary Task)
-        # From shared backbone → Road Seg Mask
+        # From shared backbone → Road Seg Mask (RAW LOGITS for BCEWithLogitsLoss)
         self.seg_head = nn.Sequential(
             # Upsample to [B, 32, 38, 50]
             nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1, bias=False),
@@ -123,9 +124,8 @@ class MultimodalEncoder(nn.Module):
             nn.Conv2d(32, 16, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(16),
             nn.ReLU(inplace=True),
-            # Final: [B, 1, 37, 50]
-            nn.Conv2d(16, 1, kernel_size=3, padding=1),
-            nn.Sigmoid()
+            # Final: [B, 1, 37, 50] - RAW LOGITS (no sigmoid, BCEWithLogitsLoss handles it)
+            nn.Conv2d(16, 1, kernel_size=3, padding=1)
         )
         
         # Head B: Conditioning Vector (Main Task)

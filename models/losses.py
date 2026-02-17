@@ -48,31 +48,34 @@ class DiffusionLoss(nn.Module):
 
 class RoadSegmentationLoss(nn.Module):
     """
-    Equation 4: Road Segmentation Loss (BCE)
+    Equation 4: Road Segmentation Loss (BCE with Logits)
     
-    L_road = -Σ[y·log(x) + (1-y)·log(1-x)]
+    L_road = -Σ[y·log(σ(x)) + (1-y)·log(1-σ(x))]
     
     where:
-    - x: Predicted road mask [B, 1, H, W]
+    - x: Predicted road logits [B, 1, H, W] (RAW, no sigmoid)
     - y: Ground truth road mask [B, 1, H, W]
+    - σ: Sigmoid function (applied internally by BCEWithLogitsLoss)
     
-    Note: This is pixel-wise binary cross-entropy averaged over all pixels.
+    Note: Using BCEWithLogitsLoss for FP16 stability (numerically stable).
     """
     
     def __init__(self, reduction='mean'):
         super().__init__()
-        self.bce = nn.BCELoss(reduction=reduction)
+        self.bce = nn.BCEWithLogitsLoss(reduction=reduction)
     
-    def forward(self, pred_mask, gt_mask):
+    def forward(self, pred_mask_logits, gt_mask):
         """
         Args:
-            pred_mask: [B, 1, H, W] - Predicted road probabilities (after sigmoid)
+            pred_mask_logits: [B, 1, H, W] - Predicted road LOGITS (before sigmoid)
             gt_mask: [B, 1, H, W] - Ground truth binary mask
             
         Returns:
             loss: scalar BCE loss
         """
-        return self.bce(pred_mask, gt_mask)
+        # BCEWithLogitsLoss handles sigmoid + BCE in one numerically stable operation
+        # Safe for FP16/autocast training
+        return self.bce(pred_mask_logits, gt_mask)
 
 
 class TopoDiffuserLoss(nn.Module):
@@ -117,11 +120,13 @@ class TopoDiffuserLoss(nn.Module):
         # Equation 3: Diffusion loss
         l_diff = self.diffusion_loss(predicted_noise, target_noise)
         
-        # Equation 4: Road segmentation loss
-        l_road = self.road_loss(pred_mask, gt_mask)
-        
-        # Equation 5: Total loss
-        l_total = l_diff + self.alpha_road * l_road
+        # Equation 4: Road segmentation loss (skip if alpha_road=0)
+        if self.alpha_road > 0:
+            l_road = self.road_loss(pred_mask, gt_mask)
+            l_total = l_diff + self.alpha_road * l_road
+        else:
+            l_road = torch.tensor(0.0, device=l_diff.device)
+            l_total = l_diff
         
         loss_dict = {
             'total': l_total.item(),
