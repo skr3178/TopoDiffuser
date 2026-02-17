@@ -13,7 +13,7 @@ Usage:
         --encoder_ckpt checkpoints/encoder_full_best.pth \
         --diffusion_ckpt checkpoints/diffusion_unet_best.pth \
         --num_scenes 5 \
-        --num_samples_per_scene 5 \
+        --num_samples_per_scene 10 \
         --save_dir results/paper_style_viz
 """
 
@@ -187,7 +187,7 @@ def create_bev_visualization(bev):
 
 @torch.no_grad()
 def generate_multiple_trajectories(encoder, diffusion_model, bev_tensor,
-                                   device, num_samples=5):
+                                   device, num_samples=10):
     """Generate K trajectory samples from a single BEV."""
     bev_tensor = bev_tensor.unsqueeze(0).to(device)
     conditioning, _ = encoder(bev_tensor)
@@ -199,7 +199,7 @@ def generate_multiple_trajectories(encoder, diffusion_model, bev_tensor,
 
 @torch.no_grad()
 def generate_trajectory_with_steps(encoder, diffusion_model, bev_tensor,
-                                   device, num_samples=5):
+                                   device, num_samples=10):
     """Generate trajectories and return intermediate denoising steps."""
     bev_tensor = bev_tensor.unsqueeze(0).to(device)
     conditioning, _ = encoder(bev_tensor)
@@ -370,7 +370,7 @@ def main():
     parser.add_argument('--diffusion_ckpt', type=str,
                         default='checkpoints/diffusion_unet_best.pth')
     parser.add_argument('--num_scenes', type=int, default=5)
-    parser.add_argument('--num_samples_per_scene', type=int, default=5)
+    parser.add_argument('--num_samples_per_scene', type=int, default=10)
     parser.add_argument('--save_dir', type=str,
                         default='results/paper_style_viz')
     parser.add_argument('--val_sequences', nargs='+', default=['08'])

@@ -258,6 +258,8 @@ def main():
                         help='Noise schedule (cosine required for T=10)')
     parser.add_argument('--precompute_batch', type=int, default=16,
                         help='Batch size for precomputing conditioning (higher = faster)')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to diffusion checkpoint to resume training from')
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -352,16 +354,64 @@ def main():
     scaler = GradScaler()
 
     # ------------------------------------------------------------------
-    # 5. Training loop
+    # 5. Resume from checkpoint if requested
+    # ------------------------------------------------------------------
+    start_epoch = 1
+    history = {'train_loss': [], 'val_loss': [], 'val_metrics': [], 'lr': []}
+    best_minADE = float('inf')
+
+    if args.resume and os.path.exists(args.resume):
+        print(f"\nResuming from {args.resume}")
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        denoising_net.load_state_dict(ckpt['denoiser_state_dict'])
+        start_epoch = ckpt.get('epoch', 0) + 1
+        if 'history' in ckpt and ckpt['history']:
+            history = ckpt['history']
+        if 'val_metrics' in ckpt and ckpt['val_metrics']:
+            best_minADE = ckpt['val_metrics'].get('minADE', float('inf'))
+        # Advance scheduler to correct position
+        for _ in range(start_epoch - 1):
+            scheduler.step()
+        print(f"  Resumed at epoch {start_epoch}, best minADE: {best_minADE:.3f}m")
+        print(f"  LR: {optimizer.param_groups[0]['lr']:.6f}")
+
+    # ------------------------------------------------------------------
+    # 6. Early stopping config
+    # ------------------------------------------------------------------
+    # Paper Table 1 targets (TopoDiffuser row)
+    PAPER_TARGETS = {
+        'minADE': 0.26,
+        'minFDE': 0.56,
+        'hit_rate': 0.93,
+        'hausdorff': 1.33,
+    }
+    TOLERANCE = 0.05  # within 5% of paper target = close enough to stop
+    patience = 10
+    epochs_no_improve = 0
+
+    def within_paper_targets(metrics):
+        """Check if all metrics are within 5% of paper targets."""
+        ade_ok = metrics['minADE'] <= PAPER_TARGETS['minADE'] * (1 + TOLERANCE)
+        fde_ok = metrics['minFDE'] <= PAPER_TARGETS['minFDE'] * (1 + TOLERANCE)
+        hr_ok = metrics['hit_rate'] >= PAPER_TARGETS['hit_rate'] * (1 - TOLERANCE)
+        hd_ok = metrics['hausdorff'] <= PAPER_TARGETS['hausdorff'] * (1 + TOLERANCE)
+        return ade_ok and fde_ok and hr_ok and hd_ok
+
+    print(f"\nPaper targets (within {TOLERANCE:.0%}):")
+    print(f"  minADE <= {PAPER_TARGETS['minADE'] * (1 + TOLERANCE):.3f}m")
+    print(f"  minFDE <= {PAPER_TARGETS['minFDE'] * (1 + TOLERANCE):.3f}m")
+    print(f"  HitRate >= {PAPER_TARGETS['hit_rate'] * (1 - TOLERANCE):.3f}")
+    print(f"  HD <= {PAPER_TARGETS['hausdorff'] * (1 + TOLERANCE):.3f}m")
+    print(f"  Early stop patience: {patience} epochs")
+
+    # ------------------------------------------------------------------
+    # 7. Training loop
     # ------------------------------------------------------------------
     print("\n" + "=" * 70)
     print("STARTING TRAINING")
     print("=" * 70)
 
-    history = {'train_loss': [], 'val_loss': [], 'val_metrics': [], 'lr': []}
-    best_minADE = float('inf')
-
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         t0 = time.time()
 
         train_loss = train_epoch(diffusion_model, train_loader, optimizer,
@@ -384,8 +434,10 @@ def main():
         print(f"  LR: {current_lr:.6f}")
 
         # Save best
+        improved = False
         if val_metrics['minADE'] < best_minADE:
             best_minADE = val_metrics['minADE']
+            improved = True
             torch.save({
                 'epoch': epoch,
                 'denoiser_state_dict': denoising_net.state_dict(),
@@ -394,10 +446,18 @@ def main():
             }, os.path.join(args.save_dir, 'diffusion_unet_best.pth'))
             print(f"  Best saved (minADE: {best_minADE:.3f}m)")
 
+        # Early stopping: track no-improvement epochs
+        if improved:
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            print(f"  No improvement for {epochs_no_improve}/{patience} epoch(s)")
+
         # Save latest
         torch.save({
             'epoch': epoch,
             'denoiser_state_dict': denoising_net.state_dict(),
+            'val_metrics': val_metrics,
             'history': history
         }, os.path.join(args.save_dir, 'diffusion_unet_latest.pth'))
 
@@ -412,6 +472,24 @@ def main():
                     return obj.item()
                 return obj
             json.dump(convert(history), f, indent=2)
+
+        # Check early stopping conditions
+        if within_paper_targets(val_metrics):
+            print(f"\n{'=' * 70}")
+            print(f"PAPER TARGETS REACHED at epoch {epoch}!")
+            print(f"  minADE: {val_metrics['minADE']:.3f}m (target <= {PAPER_TARGETS['minADE'] * (1 + TOLERANCE):.3f}m)")
+            print(f"  minFDE: {val_metrics['minFDE']:.3f}m (target <= {PAPER_TARGETS['minFDE'] * (1 + TOLERANCE):.3f}m)")
+            print(f"  HitRate: {val_metrics['hit_rate']:.3f} (target >= {PAPER_TARGETS['hit_rate'] * (1 - TOLERANCE):.3f})")
+            print(f"  HD: {val_metrics['hausdorff']:.3f}m (target <= {PAPER_TARGETS['hausdorff'] * (1 + TOLERANCE):.3f}m)")
+            print(f"{'=' * 70}")
+            break
+
+        if epochs_no_improve >= patience:
+            print(f"\n{'=' * 70}")
+            print(f"EARLY STOPPING at epoch {epoch} — no improvement for {patience} epochs")
+            print(f"  Best minADE: {best_minADE:.3f}m")
+            print(f"{'=' * 70}")
+            break
 
     print("\n" + "=" * 70)
     print(f"COMPLETE | Best minADE: {best_minADE:.3f}m")

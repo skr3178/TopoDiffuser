@@ -42,6 +42,23 @@ from denoising_network import build_denoising_network
 from metrics import compute_trajectory_metrics
 
 
+class SimpleDiffuserWrapper:
+    """Simple wrapper for encoder + diffusion without config dependencies."""
+    def __init__(self, encoder, diffusion):
+        self.encoder = encoder
+        self.diffusion = diffusion
+    
+    def sample(self, bev, num_samples=10):
+        """Generate trajectory samples from BEV."""
+        self.encoder.eval()
+        conditioning, _ = self.encoder(bev)
+        return self.diffusion.sample(conditioning, num_samples=num_samples)
+    
+    def eval(self):
+        self.encoder.eval()
+        self.diffusion.eval()
+
+
 class TrajectoryGenerator:
     """
     Trajectory generator using trained TopoDiffuser model.
@@ -87,28 +104,36 @@ class TrajectoryGenerator:
     
     def _load_separate_checkpoints(self, encoder_ckpt, diffusion_ckpt):
         """Load separately trained encoder and diffusion."""
-        from pipeline import TopoDiffuserModel
-        
-        # Build default model
-        model = TopoDiffuserModel(self._default_config()).to(self.device)
-        
-        # Load encoder
+        # Build encoder
+        encoder = build_encoder(input_channels=3, conditioning_dim=512).to(self.device)
         if encoder_ckpt and os.path.exists(encoder_ckpt):
             enc_checkpoint = torch.load(encoder_ckpt, map_location=self.device, weights_only=False)
             if 'model_state_dict' in enc_checkpoint:
-                model.encoder.load_state_dict(enc_checkpoint['model_state_dict'])
+                encoder.load_state_dict(enc_checkpoint['model_state_dict'])
             elif 'encoder_state_dict' in enc_checkpoint:
-                model.encoder.load_state_dict(enc_checkpoint['encoder_state_dict'])
+                encoder.load_state_dict(enc_checkpoint['encoder_state_dict'])
             else:
-                model.encoder.load_state_dict(enc_checkpoint)
+                encoder.load_state_dict(enc_checkpoint)
             print(f"✓ Loaded encoder from {encoder_ckpt}")
+        encoder.eval()
         
-        # Load diffusion
+        # Build diffusion
+        denoising_net = build_denoising_network(
+            'unet', num_waypoints=8, coord_dim=2,
+            conditioning_dim=512, timestep_dim=256
+        ).to(self.device)
+        
         if diffusion_ckpt and os.path.exists(diffusion_ckpt):
             diff_checkpoint = torch.load(diffusion_ckpt, map_location=self.device, weights_only=False)
-            model.diffusion.denoising_network.load_state_dict(diff_checkpoint['denoiser_state_dict'])
+            denoising_net.load_state_dict(diff_checkpoint['denoiser_state_dict'])
             print(f"✓ Loaded diffusion from {diffusion_ckpt}")
         
+        diffusion = TrajectoryDiffusionModel(
+            denoising_net, num_timesteps=10, schedule='cosine', device=self.device
+        )
+        
+        # Wrap in simple container
+        model = SimpleDiffuserWrapper(encoder, diffusion)
         return model
     
     def _default_config(self):
@@ -122,21 +147,23 @@ class TrajectoryGenerator:
                 },
                 'diffusion': {
                     'num_timesteps': 10,
+                    'beta_start': 1e-4,
+                    'beta_end': 0.02,
+                    'schedule': 'cosine',
                     'denoising_network': {
-                        'architecture': 'mlp',
+                        'architecture': 'unet',
                         'num_waypoints': 8,
                         'coord_dim': 2,
                         'conditioning_dim': 512,
                         'timestep_dim': 256,
-                        'hidden_dim': 512,
-                        'num_layers': 4
+                        'base_channels': 64
                     }
                 }
             }
         })
     
     @torch.no_grad()
-    def generate(self, bev, num_samples=5, return_all_steps=False):
+    def generate(self, bev, num_samples=10, return_all_steps=False):
         """
         Generate trajectory samples from BEV input.
         
@@ -173,7 +200,7 @@ class TrajectoryGenerator:
             return trajectories, all_steps
         return trajectories
     
-    def generate_from_file(self, lidar_path, num_samples=5):
+    def generate_from_file(self, lidar_path, num_samples=10):
         """Generate from LiDAR file."""
         lidar_points = load_kitti_lidar(lidar_path)
         bev = self.rasterizer.rasterize_lidar(lidar_points)
@@ -181,7 +208,7 @@ class TrajectoryGenerator:
         
         return self.generate(bev_tensor, num_samples)
     
-    def generate_from_sequence(self, sequence, frame_indices, data_root, num_samples=5):
+    def generate_from_sequence(self, sequence, frame_indices, data_root, num_samples=10):
         """Generate for multiple frames in a sequence."""
         lidar_dir = Path(data_root) / 'sequences' / sequence / 'velodyne'
         
@@ -275,7 +302,7 @@ def main():
                         help='Max frames per sequence (None=all)')
     
     # Generation params
-    parser.add_argument('--num_samples', type=int, default=5,
+    parser.add_argument('--num_samples', type=int, default=10,
                         help='K trajectory samples')
     parser.add_argument('--data_root', type=str,
                         default='/media/skr/storage/self_driving/TopoDiffuser/data/kitti')
