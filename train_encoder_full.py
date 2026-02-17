@@ -198,7 +198,14 @@ class KITTIFullDataset(Dataset):
             points = load_kitti_lidar(sample['lidar_path'])
             bev = self.rasterizer.rasterize_lidar(points)
 
-        return torch.from_numpy(bev), torch.from_numpy(sample['road_mask'])
+        road_mask = sample['road_mask']
+
+        # Data augmentation (training only): random horizontal flip
+        if self.split == 'train' and np.random.random() < 0.5:
+            bev = bev[:, :, ::-1].copy()          # flip BEV laterally
+            road_mask = road_mask[:, :, ::-1].copy()  # flip mask to match
+
+        return torch.from_numpy(bev), torch.from_numpy(road_mask)
 
 
 def train_epoch(model, dataloader, optimizer, scaler, device, epoch, max_grad_norm=1.0):
@@ -254,7 +261,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--workers', type=int, default=4)
     parser.add_argument('--cache_dir', type=str, default='data/kitti/bev_cache')
     args = parser.parse_args()
@@ -269,18 +276,25 @@ def main():
     model = build_encoder(input_channels=3, conditioning_dim=512).to(device)
     print(f"Model: {sum(p.numel() for p in model.parameters()):,} params")
 
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
+    # Use ReduceLROnPlateau to lower LR when validation loss plateaus
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=3, verbose=True
+    )
     scaler = GradScaler('cuda')
 
     # Data
     print("\nLoading datasets...")
+    # Fair comparison: same train as before, but validate on ALL held-out sequences
+    train_sequences = ['00', '02', '05', '07']  # Keep as is for fair comparison
+    val_sequences = ['08', '09', '10']          # Use ALL three for validation
+    
     train_dataset = KITTIFullDataset(
-        sequences=['00', '02', '05', '07'], split='train',
+        sequences=train_sequences, split='train',
         cache_dir=args.cache_dir
     )
     val_dataset = KITTIFullDataset(
-        sequences=['08'], split='all',
+        sequences=val_sequences, split='all',
         cache_dir=args.cache_dir
     )
 
@@ -307,7 +321,7 @@ def main():
 
         train_loss = train_epoch(model, train_loader, optimizer, scaler, device, epoch)
         val_loss = validate(model, val_loader, device)
-        scheduler.step()
+        scheduler.step(val_loss)
         epoch_time = time.time() - t0
 
         print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} ({epoch_time:.1f}s)")

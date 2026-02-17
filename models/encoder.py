@@ -62,30 +62,33 @@ class MultimodalEncoder(nn.Module):
         - road_seg: [B, 1, 37, 50] road segmentation prediction
     """
     
-    def __init__(self, input_channels=5, conditioning_dim=512):
+    def __init__(self, input_channels=5, conditioning_dim=512, dropout=0.3):
         super().__init__()
-        
+
         self.input_channels = input_channels
         self.conditioning_dim = conditioning_dim
-        
+
         # ========== ENCODER PATH (Contracting) ==========
         # NOTE: Using CBRBlock (Conv+BN+ReLU) for all encoder blocks
         # This fixes gradient flow and feature diversity issues found in testing
-        
+
         # c1: [B, C_in, 300, 400] → [B, 32, 150, 200]
         self.c1 = CBRBlock(input_channels, 32, kernel_size=3, stride=2, padding=1)
-        
+
         # c2: [B, 32, 150, 200] → [B, 64, 75, 100]
         self.c2 = CBRBlock(32, 64, kernel_size=3, stride=2, padding=1)
-        
+
         # c3: [B, 64, 75, 100] → [B, 128, 38, 50]
         self.c3 = CBRBlock(64, 128, kernel_size=3, stride=2, padding=1)
-        
+        self.drop3 = nn.Dropout2d(dropout)
+
         # c4: [B, 128, 38, 50] → [B, 256, 19, 25]
         self.c4 = CBRBlock(128, 256, kernel_size=3, stride=2, padding=1)
-        
+        self.drop4 = nn.Dropout2d(dropout)
+
         # c5: [B, 256, 19, 25] → [B, 512, 10, 13]
         self.c5 = CBRBlock(256, 512, kernel_size=3, stride=2, padding=1)
+        self.drop5 = nn.Dropout2d(dropout * 2)
         
         # ========== DECODER PATH (Expanding) ==========
         
@@ -105,27 +108,28 @@ class MultimodalEncoder(nn.Module):
         # BCEWithLogitsLoss handles sigmoid internally for the seg head,
         # and the conditioning head uses its own ReLU activation)
         self.shared_backbone = nn.Sequential(
-            # CB Blocks (multiple)
+            # CB Blocks (multiple) with dropout
             CBBlock(64, 64, kernel_size=3, stride=1, padding=1),
+            nn.Dropout2d(dropout),
             CBBlock(64, 64, kernel_size=3, stride=1, padding=1),
+            nn.Dropout2d(dropout),
             # Conv + BN (activation applied per-head, not here)
             nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(64),
+            nn.Dropout2d(dropout),
         )
         
         # Head A: Road Segmentation (Auxiliary Task)
         # From shared backbone → Road Seg Mask (RAW LOGITS for BCEWithLogitsLoss)
+        # LIGHTWEIGHT with dropout to prevent overfitting
         self.seg_head = nn.Sequential(
             # Upsample to [B, 32, 38, 50]
             nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
-            # Conv to adjust size then final output
-            nn.Conv2d(32, 16, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(16),
-            nn.ReLU(inplace=True),
-            # Final: [B, 1, 37, 50] - RAW LOGITS (no sigmoid, BCEWithLogitsLoss handles it)
-            nn.Conv2d(16, 1, kernel_size=3, padding=1)
+            nn.Dropout2d(dropout),
+            # Direct to output (removed intermediate conv to reduce capacity)
+            nn.Conv2d(32, 1, kernel_size=3, padding=1)
         )
         
         # Head B: Conditioning Vector (Main Task)
@@ -134,6 +138,7 @@ class MultimodalEncoder(nn.Module):
         self.cond_bn = nn.BatchNorm2d(64)
         self.cond_relu = nn.ReLU(inplace=True)
         self.cond_pool = nn.AdaptiveAvgPool2d((1, 8))  # [B, 64, 1, 8] as per paper
+        self.cond_drop = nn.Dropout(dropout * 2)
         self.cond_fc = nn.Linear(64 * 8, conditioning_dim)  # [B, 512] → [B, 512]
         
     def forward(self, x):
@@ -156,9 +161,9 @@ class MultimodalEncoder(nn.Module):
         # ========== ENCODER ==========
         c1_out = self.c1(x)      # [B, 32, 150, 200]
         c2_out = self.c2(c1_out)  # [B, 64, 75, 100]
-        c3_out = self.c3(c2_out)  # [B, 128, 38, 50]
-        c4_out = self.c4(c3_out)  # [B, 256, 19, 25]
-        c5_out = self.c5(c4_out)  # [B, 512, 10, 13]
+        c3_out = self.drop3(self.c3(c2_out))  # [B, 128, 38, 50]
+        c4_out = self.drop4(self.c4(c3_out))  # [B, 256, 19, 25]
+        c5_out = self.drop5(self.c5(c4_out))  # [B, 512, 10, 13]
         
         # ========== DECODER ==========
         
@@ -199,6 +204,7 @@ class MultimodalEncoder(nn.Module):
         # Pool to [B, 64, 1, 8] as per paper: obs_cond (before reshape) [8, 64, 8]
         cond_features = self.cond_pool(cond_features)  # [B, 64, 1, 8]
         cond_flat = cond_features.view(B, -1)  # [B, 64*8] = [B, 512]
+        cond_flat = self.cond_drop(cond_flat)
         conditioning = self.cond_fc(cond_flat)  # [B, 512]
         
         return conditioning, road_seg
