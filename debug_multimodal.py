@@ -132,7 +132,7 @@ def test_multimodal_bev(sequence='00', frame_idx=100,
     trajectory = []
     for pose in past_poses:
         pose_mat = pose.reshape(3, 4)
-        trajectory.append([pose_mat[0, 3], pose_mat[1, 3]])
+        trajectory.append([pose_mat[0, 3], pose_mat[2, 3]])  # tx, tz (ground plane)
     trajectory = np.array(trajectory)
     
     history_bev, history_debug = trajectory_to_bev(

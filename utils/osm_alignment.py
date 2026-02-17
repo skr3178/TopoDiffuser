@@ -92,7 +92,7 @@ def compute_gps_to_local_transform(oxts_data, poses):
     
     # Extract local positions from poses (translation part)
     local_x = poses[:, 3]   # First row, last column
-    local_y = poses[:, 7]   # Second row, last column
+    local_y = poses[:, 11]  # tz (forward) — KITTI ground plane is (x, z), not (x, y)
     
     # Compute offset (difference between UTM and local at start)
     # Use first frame as reference

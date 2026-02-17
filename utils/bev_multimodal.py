@@ -89,26 +89,37 @@ def compute_gps_to_local_transform(oxts_data: np.ndarray,
     utm_north = np.array(utm_north)
     
     # Extract local positions from poses (translation part)
-    local_x = poses[:, 3]   # First row, last column
-    local_y = poses[:, 7]   # Second row, last column
-    
-    # Compute offset (difference between UTM and local at start)
-    offset_east = utm_east[0] - local_x[0]
-    offset_north = utm_north[0] - local_y[0]
-    
-    # Compute alignment error
-    aligned_x = utm_east - offset_east
-    aligned_y = utm_north - offset_north
-    
-    errors = np.sqrt((aligned_x - local_x)**2 + (aligned_y - local_y)**2)
-    
+    # KITTI camera convention: x=right, y=DOWN, z=forward
+    # Ground plane is (x, z), NOT (x, y)
+    local_x = poses[:, 3]   # tx (right)
+    local_y = poses[:, 11]  # tz (forward) — was poses[:,7] (ty=vertical, WRONG)
+
+    # Use Procrustes alignment (handles rotation + scale + translation)
+    # instead of simple offset subtraction
+    from utils.gps_alignment import compute_procrustes_alignment
+    gps_coords = np.column_stack([utm_east, utm_north])
+    local_coords = np.column_stack([local_x, local_y])
+
+    alignment = compute_procrustes_alignment(gps_coords, local_coords)
+
+    # Apply alignment to get transformed GPS in local frame
+    R = alignment['R']
+    t = alignment['t']
+    s = alignment['scale']
+    aligned = s * (gps_coords @ R.T) + t
+
+    errors = np.sqrt(np.sum((aligned - local_coords)**2, axis=1))
+
     return {
-        'offset_east': offset_east,
-        'offset_north': offset_north,
+        'offset_east': t[0],
+        'offset_north': t[1],
         'utm_east': utm_east,
         'utm_north': utm_north,
-        'aligned_x': aligned_x,
-        'aligned_y': aligned_y,
+        'aligned_x': aligned[:, 0],
+        'aligned_y': aligned[:, 1],
+        'R': R,
+        't': t,
+        'scale': s,
         'mean_error': np.mean(errors),
         'max_error': np.max(errors),
         'std_error': np.std(errors)
