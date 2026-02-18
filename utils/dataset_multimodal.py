@@ -162,23 +162,55 @@ class KITTIFullMultimodalDataset(Dataset):
             
             poses = np.loadtxt(poses_path)
             
-            # Compute GPS transform
+            # Compute GPS transform - MATCH LENGTHS FIRST
             try:
-                transform = compute_gps_to_local_transform(oxts_data, poses)
+                # Match lengths to avoid shape mismatch
+                min_frames = min(len(oxts_data), len(poses))
+                oxts_data_matched = oxts_data[:min_frames]
+                poses_matched = poses[:min_frames]
+                
+                transform = compute_gps_to_local_transform(oxts_data_matched, poses_matched)
+                transform['num_frames'] = min_frames  # Store matched frame count
                 self.gps_transforms[seq] = transform
-                print(f"    ✓ GPS transform computed")
+                print(f"    ✓ GPS transform computed ({min_frames} frames)")
                 print(f"      Mean alignment error: {transform['mean_error']:.2f}m")
                 print(f"      Max alignment error: {transform['max_error']:.2f}m")
             except Exception as e:
                 print(f"    ⚠️  Error computing GPS transform: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
             
-            # TODO: Load actual OSM data here
-            # For now, create placeholder
-            self.osm_data[seq] = {
-                'edges': [],  # Will be populated from OSM files
-                'source': 'pending'
-            }
+            # Load actual OSM polylines data
+            osm_polylines_path = Path('data/osm_polylines') / f'{seq}_polylines.pkl'
+            if osm_polylines_path.exists():
+                try:
+                    with open(osm_polylines_path, 'rb') as f:
+                        polylines = pickle.load(f)
+                    # polylines is a list of [(lat, lon), ...] segments
+                    self.osm_data[seq] = {
+                        'polylines': polylines,
+                        'edges': polylines,  # Use polylines as edges
+                        'source': 'osm_polylines',
+                        'num_polylines': len(polylines)
+                    }
+                    print(f"    ✓ OSM data loaded: {len(polylines)} polylines")
+                except Exception as e:
+                    print(f"    ⚠️  Error loading OSM data: {e}")
+                    self.osm_data[seq] = {
+                        'polylines': [],
+                        'edges': [],
+                        'source': 'error',
+                        'num_polylines': 0
+                    }
+            else:
+                print(f"    ⚠️  No OSM polylines found at {osm_polylines_path}")
+                self.osm_data[seq] = {
+                    'polylines': [],
+                    'edges': [],
+                    'source': 'missing',
+                    'num_polylines': 0
+                }
     
     def _build_index(self) -> List[Dict]:
         """Build index of valid (sequence, frame) pairs."""
@@ -245,11 +277,13 @@ class KITTIFullMultimodalDataset(Dataset):
         past_poses = poses[start_idx:frame_idx+1]
         
         # Convert to trajectory waypoints
+        # KITTI: x=right, y=down, z=forward
+        # Ground plane is (x, z), NOT (x, y)
         trajectory = []
         for pose in past_poses:
             pose_mat = pose.reshape(3, 4)
-            x, y = pose_mat[0, 3], pose_mat[1, 3]
-            trajectory.append([x, y])
+            x, z = pose_mat[0, 3], pose_mat[2, 3]  # tx (right), tz (forward)
+            trajectory.append([x, z])
         
         trajectory = np.array(trajectory)
         
@@ -315,7 +349,8 @@ class KITTIFullMultimodalDataset(Dataset):
         for i in range(1, len(future_poses)):
             pose = future_poses[i].reshape(3, 4)
             pos = pose[:, 3]
-            dist = np.linalg.norm(pos[:2] - current_pos[:2])
+            # Use (x, z) for ground plane distance, not (x, y)
+            dist = np.linalg.norm([pos[0] - current_pos[0], pos[2] - current_pos[2]])
             dist_accum += dist
             
             if dist_accum >= self.spacing_meters and len(trajectory) < self.future_frames:

@@ -1,0 +1,15 @@
+{
+  "sequence": "00",
+  "transform": {
+    "offset_east": 455394.3736274497,
+    "offset_north": 5425694.472995502,
+    "scale": 0.987514985596376,
+    "yaw_offset": -1.0395963267858563,
+    "ref_utm_east": 455394.3736274497,
+    "ref_utm_north": 5425694.472995502,
+    "ref_local_x": 5.551115e-17,
+    "ref_local_y": -4.440892e-16
+  },
+  "num_osm_segments": 15024,
+  "num_frames": 4442
+}

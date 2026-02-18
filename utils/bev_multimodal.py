@@ -63,17 +63,33 @@ def latlon_to_utm(lat: float, lon: float, zone: int = 32) -> Tuple[float, float]
 
 
 def compute_gps_to_local_transform(oxts_data: np.ndarray, 
-                                   poses: np.ndarray) -> Dict:
+                                   poses: np.ndarray,
+                                   sequence: str = None) -> Dict:
     """
     Compute transformation from GPS (UTM) to KITTI local frame.
     
     Args:
         oxts_data: [N, 30] OXTS readings (lat, lon in first 2 cols)
         poses: [N, 12] KITTI pose matrices (3x4 flattened)
+        sequence: Optional sequence number to load pre-computed alignment
     
     Returns:
         Dictionary with offset and rotation for alignment
     """
+    # Try to load pre-computed alignment if sequence is provided
+    if sequence is not None:
+        alignment_path = Path('data/gps_alignments') / f'{sequence}_alignment.pkl'
+        if alignment_path.exists():
+            try:
+                import pickle
+                with open(alignment_path, 'rb') as f:
+                    saved_alignment = pickle.load(f)
+                # Load frame-by-frame transforms if available
+                if 'frame_R' in saved_alignment and 'frame_t' in saved_alignment:
+                    return saved_alignment
+            except Exception as e:
+                print(f"  Warning: Could not load saved alignment: {e}")
+    
     # Extract GPS positions and convert to UTM
     lats = oxts_data[:, 0]
     lons = oxts_data[:, 1]
@@ -122,7 +138,11 @@ def compute_gps_to_local_transform(oxts_data: np.ndarray,
         'scale': s,
         'mean_error': np.mean(errors),
         'max_error': np.max(errors),
-        'std_error': np.std(errors)
+        'std_error': np.std(errors),
+        'frame_R': [R] * len(oxts_data),  # For compatibility
+        'frame_t': [t] * len(oxts_data),
+        'frame_scale': [s] * len(oxts_data),
+        'num_frames': len(oxts_data)
     }
 
 
@@ -131,20 +151,26 @@ def world_to_ego(point_world: np.ndarray, pose: np.ndarray) -> np.ndarray:
     Transform point from world frame to ego frame.
     
     Args:
-        point_world: [2] or [3] (x, y) or (x, y, z) in world frame
+        point_world: [2] (x, z) in world frame (ground plane coordinates)
+                   or [3] (x, y, z) in world frame
         pose: [3, 4] transformation matrix [R|t]
     
     Returns:
-        point_ego: [2] or [3] in ego frame
+        point_ego: [2] (x, z) in ego frame (ground plane)
     """
     R = pose[:, :3]
     t = pose[:, 3]
     
     if len(point_world) == 2:
-        point_world = np.array([point_world[0], point_world[1], 0])
+        # 2D input: interpret as (x, z) ground plane coordinates
+        # Create full 3D point with y=0
+        point_world_3d = np.array([point_world[0], 0, point_world[1]])
+    else:
+        point_world_3d = point_world
     
-    point_ego = R.T @ (point_world - t)
-    return point_ego[:2]  # Return (x, y)
+    point_ego_3d = R.T @ (point_world_3d - t)
+    # Return (x, z) for ground plane
+    return point_ego_3d[[0, 2]]
 
 
 # =============================================================================
@@ -398,9 +424,16 @@ def osm_to_bev(osm_edges: List[List[Tuple[float, float]]],
     
     # Extract current position in world frame
     current_x = current_pose[0, 3]
-    current_y = current_pose[1, 3]
+    current_y = current_pose[2, 3]  # tz (forward), not ty
     
-    # Get GPS to local transform
+    # Get GPS to local transform components
+    # The transform includes rotation R, translation t, and scale
+    R = gps_transform.get('R', np.eye(2))
+    t = gps_transform.get('t', np.array([0, 0]))
+    s = gps_transform.get('scale', 1.0)
+    
+    # Fallback to offset method if R is not available
+    use_procrustes = 'R' in gps_transform
     offset_east = gps_transform.get('offset_east', 0)
     offset_north = gps_transform.get('offset_north', 0)
     
@@ -414,9 +447,15 @@ def osm_to_bev(osm_edges: List[List[Tuple[float, float]]],
             # GPS → UTM
             utm_e, utm_n = latlon_to_utm(lat, lon)
             
-            # UTM → KITTI world
-            world_x = utm_e - offset_east
-            world_y = utm_n - offset_north
+            # UTM → KITTI world (using Procrustes if available)
+            if use_procrustes:
+                gps_coord = np.array([utm_e, utm_n])
+                world_coord = s * (R @ gps_coord) + t
+                world_x, world_y = world_coord[0], world_coord[1]
+            else:
+                # Fallback to simple offset
+                world_x = utm_e - offset_east
+                world_y = utm_n - offset_north
             
             edge_points_world.append((world_x, world_y))
             debug_info['points_transformed'] += 1

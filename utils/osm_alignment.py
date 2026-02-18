@@ -91,8 +91,9 @@ def compute_gps_to_local_transform(oxts_data, poses):
     utm_north = np.array(utm_north)
     
     # Extract local positions from poses (translation part)
-    local_x = poses[:, 3]   # First row, last column
-    local_y = poses[:, 11]  # tz (forward) — KITTI ground plane is (x, z), not (x, y)
+    # poses are [N, 3, 4] where last column is translation
+    local_x = poses[:, 0, 3]   # tx (right)
+    local_y = poses[:, 2, 3]   # tz (forward) — KITTI ground plane is (x, z)
     
     # Compute offset (difference between UTM and local at start)
     # Use first frame as reference
@@ -118,7 +119,7 @@ def compute_gps_to_local_transform(oxts_data, poses):
     # From poses (extract yaw from rotation matrix)
     # R = [r11 r12 r13; r21 r22 r23; r31 r32 r33]
     # yaw = atan2(r21, r11)
-    pose_yaw = np.arctan2(poses[:, 4], poses[:, 0])
+    pose_yaw = np.arctan2(poses[:, 1, 0], poses[:, 0, 0])
     
     # Yaw offset
     yaw_offset = pose_yaw[0] - oxts_yaw[0]

@@ -265,10 +265,12 @@ def compute_gps_to_odometry_transform(sequence: str,
     poses = np.loadtxt(poses_path)[:len(gps_coords)]
     
     # Extract local coordinates
+    # KITTI camera convention: x=right, y=DOWN, z=forward
+    # Ground plane is (x, z), NOT (x, y) which is vertical
     local_coords = []
     for pose in poses:
         pose_mat = pose.reshape(3, 4)
-        local_coords.append([pose_mat[0, 3], pose_mat[1, 3]])
+        local_coords.append([pose_mat[0, 3], pose_mat[2, 3]])  # (tx, tz)
     
     local_coords = np.array(local_coords)
     

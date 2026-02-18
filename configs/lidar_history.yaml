@@ -1,0 +1,150 @@
+# LiDAR + Trajectory History Configuration (4 Channels)
+# Paper: TopoDiffuser Section IV-B, Table II (Phase 2 ablation)
+#
+# Expected improvement over LiDAR-only:
+#   HD: 0.27 -> 0.23 (-14.8%)
+
+base_config: "default.yaml"
+
+project:
+  name: "TopoDiffuser-LiDAR-History"
+  description: "4-channel encoder: LiDAR (3ch) + Trajectory History (1ch)"
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+data:
+  train_sequences: ["00", "02", "05", "07"]
+  val_sequences: ["00", "02", "05", "07"]  # 80/20 split within sequences
+  test_sequences: ["08", "09", "10"]
+  
+  # Trajectory History (Modality 2)
+  trajectory:
+    num_past: 5              # Paper: 5 keyframes
+    num_future: 8            # Paper: 8 waypoints
+    waypoint_spacing: 2.0    # Paper: 2-meter intervals
+    max_distance: 16.0       # 8 waypoints × 2m = 16m prediction horizon
+  
+  # BEV Configuration
+  bev:
+    channels: 4              # LiDAR [3] + History [1]
+    height: 300
+    width: 400
+    resolution: 0.1          # meters per pixel
+    x_range: [-20, 20]       # 40m total width
+    y_range: [-10, 30]       # 40m total length ( ego at y=0, 30m forward, 10m backward)
+  
+  # LiDAR specific
+  lidar:
+    z_range: [-3, 4]
+    intensity_scale: 255.0
+
+# =============================================================================
+# Model Architecture (4 channels)
+# =============================================================================
+model:
+  name: "TopoDiffuser-Encoder-4ch"
+  
+  encoder:
+    input_channels: 4        # LiDAR (3) + History (1)
+    conditioning_dim: 512
+    hidden_dims: [32, 64, 128, 256, 512]
+    decoder_dim: 64
+    use_batch_norm: true
+    activation: "relu"
+    
+    segmentation_head:
+      enabled: true
+      output_size: [37, 50]
+      intermediate_channels: 64
+    
+    conditioning_head:
+      enabled: true
+      output_dim: 512
+      pool_type: "flatten"
+  
+  diffusion:
+    num_timesteps: 10
+    beta_schedule: "linear"
+    beta_start: 0.0001
+    beta_end: 0.02
+    
+    denoising_network:
+      architecture: "mlp"
+      num_waypoints: 8
+      coord_dim: 2
+      hidden_dim: 512
+      num_layers: 4
+      timestep_dim: 256
+      conditioning_dim: 512
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+training:
+  mode: "joint"
+  epochs: 50               # Fine-tuning from LiDAR-only
+  batch_size: 32
+  num_workers: 4
+  
+  optimizer:
+    type: "Adam"
+    lr: 0.003
+    weight_decay: 0.0
+    betas: [0.9, 0.999]
+  
+  scheduler:
+    type: "CosineAnnealingLR"
+    T_max: 50
+    eta_min: 1.0e-6
+  
+  mixed_precision: true
+  grad_clip: 1.0
+  
+  # Warm start from LiDAR-only checkpoint
+  warm_start:
+    enabled: true
+    checkpoint: "checkpoints/encoder_expanded_best.pth"
+    freeze_layers: []        # Layers to freeze (empty = train all)
+  
+  loss:
+    alpha_road: 0.1          # Auxiliary road segmentation loss weight
+
+# =============================================================================
+# Validation
+# =============================================================================
+validation:
+  batch_size: 64
+  frequency: 1
+  
+  metrics:
+    minADE: true
+    minFDE: true
+    maxADE: true
+    HitRate: true
+    Hausdorff: true
+  
+  hitrate_threshold: 2.0
+  num_samples: 5
+
+# =============================================================================
+# Ablation Study Support
+# =============================================================================
+ablation:
+  # Set to false to disable history (LiDAR-only baseline)
+  use_history: true
+  
+  # For comparison studies
+  variants:
+    - name: "lidar_only"
+      use_history: false
+    - name: "lidar_history"
+      use_history: true
+
+# =============================================================================
+# Inference
+# =============================================================================
+inference:
+  num_samples: 5
+  denoising_steps: 10
+  selection_method: "minADE"

@@ -252,6 +252,8 @@ def poses_to_trajectory(poses, num_frames=5, spacing_meters=2.0):
     Extract trajectory history from KITTI pose file.
     
     KITTI poses are 3x4 transformation matrices [R|t] flattened row-wise.
+    KITTI coordinate system: x=right, y=down, z=forward
+    For ground plane trajectory, we use (x, z).
     
     Args:
         poses: [N, 12] array of flattened 3x4 pose matrices
@@ -259,24 +261,27 @@ def poses_to_trajectory(poses, num_frames=5, spacing_meters=2.0):
         spacing_meters: spacing between keyframes in meters
     
     Returns:
-        trajectory: [num_frames, 2] array of (x, y) positions
+        trajectory: [num_frames, 2] array of (x, z) positions (ground plane)
     """
     # Extract translation (last column of each 3x4 matrix)
     # Format: r11 r12 r13 tx r21 r22 r23 ty r31 r32 r33 tz
     positions = poses[:, [3, 7, 11]]  # (x, y, z)
     
+    # Use (x, z) for ground plane trajectory (z is forward in KITTI)
+    positions_2d = positions[:, [0, 2]]  # (x, z)
+    
     # Select keyframes based on spacing
     trajectory = []
-    last_pos = positions[-1] if len(positions) > 0 else np.array([0, 0, 0])
-    trajectory.append(last_pos[:2])  # Current position
+    last_pos = positions_2d[-1] if len(positions_2d) > 0 else np.array([0, 0])
+    trajectory.append(last_pos)  # Current position
     
     dist_accum = 0
-    for i in range(len(positions) - 2, -1, -1):
-        dist = np.linalg.norm(positions[i] - positions[i + 1])
+    for i in range(len(positions_2d) - 2, -1, -1):
+        dist = np.linalg.norm(positions_2d[i] - positions_2d[i + 1])
         dist_accum += dist
         
         if dist_accum >= spacing_meters and len(trajectory) < num_frames:
-            trajectory.insert(0, positions[i][:2])
+            trajectory.insert(0, positions_2d[i])
             dist_accum = 0
     
     # Pad if not enough frames
