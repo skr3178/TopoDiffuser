@@ -29,10 +29,10 @@ from utils.bev_multimodal import (
     osm_to_bev,
     draw_line
 )
-from utils.gps_alignment import (
-    compute_gps_to_odometry_transform,
-    transform_gps_to_odometry,
-    load_alignment
+from utils.osm_alignment import (
+    compute_gps_to_local_transform,
+    transform_osm_to_local,
+    load_oxts_data
 )
 from models.bev_rasterization import BEVRasterizer
 
@@ -90,7 +90,12 @@ def compute_history_bev(poses: np.ndarray,
         
         # Transform to ego frame: p_ego = R^T @ (p_world - t)
         pos_ego = current_R.T @ (pos_world - current_t)
-        x, y = pos_ego[0], pos_ego[1]
+        # KITTI camera: x=right, y=down (vertical), z=forward
+        # BEV: x=right (same), y=forward (same as camera z, both increase forward)
+        # In ego frame: points ahead have positive Z, points behind have negative Z
+        # In BEV: points ahead have positive Y, points behind have negative Y
+        # So: BEV_Y = ego_Z (direct mapping, no negation needed)
+        x, y = pos_ego[0], pos_ego[2]
         
         # Convert to pixel coordinates
         px = int((x - x_range[0]) / resolution)
@@ -146,6 +151,78 @@ def split_osm_edges_to_polylines(edges_array: np.ndarray,
         polylines.append(current_polyline)
     
     return polylines
+
+
+def compute_osm_bev_aligned(osm_polylines: List[np.ndarray],
+                            current_pose: np.ndarray,
+                            grid_size: Tuple[int, int] = (300, 400),
+                            resolution: float = 0.1,
+                            x_range: Tuple[float, float] = (-20, 20),
+                            y_range: Tuple[float, float] = (-10, 30),
+                            max_distance: float = 50.0) -> np.ndarray:
+    """
+    Compute OSM roads BEV from PRE-ALIGNED polylines (already in KITTI coords).
+    
+    Args:
+        osm_polylines: List of polylines, each [N, 2] array in KITTI world coordinates
+        current_pose: Current ego pose [3, 4]
+        grid_size: BEV grid size
+        resolution: Meters per pixel
+        x_range, y_range: Coordinate ranges
+        max_distance: Maximum distance to include roads
+        
+    Returns:
+        osm_bev: [1, H, W] binary mask
+    """
+    H, W = grid_size
+    bev = np.zeros((1, H, W), dtype=np.float32)
+    
+    if not osm_polylines:
+        return bev
+    
+    # Extract current position in world frame
+    current_R = current_pose[:, :3]
+    current_t = current_pose[:, 3]
+    current_pos = current_pose[:2, 3]  # [x, z] in world frame
+    
+    # Process each polyline
+    for polyline in osm_polylines:
+        if len(polyline) < 2:
+            continue
+        
+        # Transform polyline to ego frame
+        ego_points = []
+        for world_pt in polyline:
+            # world_pt is [x, z] in KITTI world frame
+            world_pt_3d = np.array([world_pt[0], 0, world_pt[1]])
+            ego_pt = current_R.T @ (world_pt_3d - current_t)
+            ego_points.append(ego_pt[:2])
+        
+        ego_points = np.array(ego_points)
+        
+        # Check if polyline is within range
+        center = np.mean(ego_points, axis=0)
+        distance = np.linalg.norm(center)
+        
+        if distance > max_distance:
+            continue
+        
+        # Convert to pixels and draw
+        pixel_coords = []
+        for ego_pt in ego_points:
+            px = int((ego_pt[0] - x_range[0]) / resolution)
+            py = int((ego_pt[1] - y_range[0]) / resolution)
+            
+            if 0 <= px < W and 0 <= py < H:
+                pixel_coords.append((px, py))
+        
+        # Draw polyline
+        for i in range(len(pixel_coords) - 1):
+            pt1 = pixel_coords[i]
+            pt2 = pixel_coords[i + 1]
+            bev[0] = draw_line(bev[0], pt1, pt2, width=3)
+    
+    return bev
 
 
 def compute_osm_bev(osm_polylines: List[List[Tuple[float, float]]],
@@ -280,7 +357,8 @@ def compute_osm_proxy_from_trajectory(poses: np.ndarray,
         
         # Transform to ego frame
         pos_ego = current_R.T @ (pos_world - current_t)
-        x, y = pos_ego[0], pos_ego[1]
+        # Use X and Z for ground plane (Z is forward in camera frame)
+        x, y = pos_ego[0], pos_ego[2]
         
         # Convert to pixel
         px = int((x - x_range[0]) / resolution)
@@ -295,6 +373,84 @@ def compute_osm_proxy_from_trajectory(poses: np.ndarray,
     return bev_dilated[np.newaxis, :, :]
 
 
+def load_aligned_osm_polylines(seq: str) -> Optional[List[np.ndarray]]:
+    """
+    Load pre-aligned OSM polylines for a sequence.
+    
+    Uses VERIFIED aligned files based on visual inspection:
+    - seq00: refined
+    - seq01: bestfit
+    - seq02: bestfit (inspect_seq02_aligned.png)
+    - seq05: bestfit
+    - seq07: bestfit (inspect_seq07_aligned.png)
+    - seq08: bestfit
+    - seq09: refined
+    - seq10: bestfit
+    
+    Args:
+        seq: Sequence number (e.g., '00')
+        
+    Returns:
+        List of polyline segments, each is [N, 2] array in KITTI odometry coords
+        Returns None if file not found.
+    """
+    # Map of verified variants based on visual inspection
+    VERIFIED_VARIANTS = {
+        '00': 'refined',
+        '01': 'bestfit',
+        '02': 'bestfit',  # inspect_seq02_aligned.png
+        '05': 'bestfit',
+        '07': 'bestfit',  # inspect_seq07_aligned.png
+        '08': 'bestfit',  # osm_pbf_aligned_seq08_bestfit.png
+        '09': 'refined',  # osm_pbf_aligned_seq09_refined.png
+        '10': 'bestfit',
+    }
+    
+    # Get verified variant for this sequence
+    verified_variant = VERIFIED_VARIANTS.get(seq, 'bestfit')
+    
+    # Try verified variant first, then fallbacks
+    variants = [verified_variant, 'bestfit', 'refined', 'regbez', '']
+    variants = list(dict.fromkeys(variants))  # Remove duplicates while preserving order
+    
+    for variant in variants:
+        if variant:
+            filename = f'osm_polylines_aligned_seq{seq}_{variant}.pkl'
+        else:
+            filename = f'osm_polylines_aligned_seq{seq}.pkl'
+        
+        filepath = Path(filename)
+        if filepath.exists():
+            print(f"  Loading aligned OSM polylines from {filepath}")
+            try:
+                with open(filepath, 'rb') as f:
+                    polylines = pickle.load(f)
+                
+                # Convert to expected format (list of arrays)
+                if isinstance(polylines, list):
+                    # Check if it's a list of segments (each [2,2]) or full polylines
+                    if len(polylines) > 0 and hasattr(polylines[0], 'shape'):
+                        if polylines[0].shape == (2, 2):
+                            # List of segments - each segment is a 2-point line
+                            # Treat each segment as its own polyline for rendering
+                            segment_polylines = [seg for seg in polylines]
+                            print(f"  Loaded {len(segment_polylines)} segments as polylines")
+                            return segment_polylines
+                        else:
+                            # Already in polyline format (each polyline has N points)
+                            print(f"  Loaded {len(polylines)} polylines")
+                            return polylines
+                
+                print(f"  Warning: Unexpected format, using as-is")
+                return polylines
+                
+            except Exception as e:
+                print(f"  Warning: Failed to load {filepath}: {e}")
+                continue
+    
+    return None
+
+
 def process_sequence(seq: str,
                      data_root: Path,
                      raw_data_root: Path,
@@ -302,7 +458,8 @@ def process_sequence(seq: str,
                      cache_5ch_dir: Path,
                      osm_edges_dir: Path,
                      gps_alignments_dir: Path,
-                     use_osm_proxy: bool = False) -> Dict:
+                     use_osm_proxy: bool = False,
+                     use_aligned_osm: bool = True) -> Dict:
     """
     Process one sequence and generate 5-channel BEV cache.
     
@@ -315,6 +472,7 @@ def process_sequence(seq: str,
         osm_edges_dir: Path to OSM edge .npy files
         gps_alignments_dir: Path to GPS alignment .pkl files
         use_osm_proxy: Use trajectory proxy instead of real OSM
+        use_aligned_osm: Use pre-aligned OSM polylines (default: True)
     
     Returns:
         Statistics dictionary
@@ -333,32 +491,51 @@ def process_sequence(seq: str,
     
     # Load OSM data if available
     osm_polylines = None
-    alignment = None
+    alignment = None  # Not needed for aligned polylines
     
     if not use_osm_proxy:
-        # Try to load OSM edges
-        osm_edges_path = osm_edges_dir / f'{seq}_edges.npy'
-        if osm_edges_path.exists():
-            print(f"  Loading OSM edges from {osm_edges_path}")
-            edges_array = np.load(osm_edges_path)
-            osm_polylines = split_osm_edges_to_polylines(edges_array)
-            print(f"  Split into {len(osm_polylines)} polylines")
+        if use_aligned_osm:
+            # Try to load pre-aligned OSM polylines
+            osm_polylines = load_aligned_osm_polylines(seq)
         
-        # Try to load GPS alignment
-        alignment_path = gps_alignments_dir / f'{seq}_alignment.pkl'
-        if alignment_path.exists():
-            print(f"  Loading GPS alignment from {alignment_path}")
-            alignment = load_alignment(alignment_path)
+        if osm_polylines is None:
+            # Fallback to raw OSM + GPS alignment
+            osm_edges_path = osm_edges_dir / f'{seq}_edges.npy'
+            if osm_edges_path.exists():
+                print(f"  Loading OSM edges from {osm_edges_path}")
+                edges_array = np.load(osm_edges_path)
+                osm_polylines = split_osm_edges_to_polylines(edges_array)
+                print(f"  Split into {len(osm_polylines)} polylines")
             
-            # Check alignment quality
-            if alignment.get('mean_error', 999) > 10.0 and not alignment.get('is_windowed', False):
-                print(f"  ⚠️  Poor alignment ({alignment['mean_error']:.1f}m), switching to proxy")
-                alignment = None
-                osm_polylines = None
-        else:
-            print(f"  ⚠️  No GPS alignment found, using trajectory proxy")
+            # Try to load GPS alignment
+            alignment_path = gps_alignments_dir / f'{seq}_alignment.pkl'
+            if alignment_path.exists():
+                print(f"  Loading GPS alignment from {alignment_path}")
+                try:
+                    with open(alignment_path, 'rb') as f:
+                        alignment = pickle.load(f)
+                except Exception as e:
+                    print(f"  Warning: Failed to load alignment: {e}")
+                    alignment = None
+                
+                # Check alignment quality
+                if alignment and alignment.get('mean_error', 999) > 10.0 and not alignment.get('is_windowed', False):
+                    print(f"  ⚠️  Poor alignment ({alignment['mean_error']:.1f}m), switching to proxy")
+                    alignment = None
+                    osm_polylines = None
+            else:
+                print(f"  ⚠️  No GPS alignment found, using trajectory proxy")
     
-    mode = "proxy" if (osm_polylines is None or alignment is None) else "osm"
+    # Mode detection: 
+    # - "aligned": using pre-aligned polylines (no alignment needed)
+    # - "osm": using raw OSM with GPS alignment
+    # - "proxy": using trajectory proxy (no OSM data)
+    if osm_polylines is None:
+        mode = "proxy"
+    elif alignment is None and use_aligned_osm:
+        mode = "aligned"
+    else:
+        mode = "osm"
     print(f"  Mode: {mode}")
     
     # Create output directory
@@ -403,15 +580,27 @@ def process_sequence(seq: str,
             stats['num_with_history'] += 1
         
         # Compute OSM BEV (channel 4)
-        if osm_polylines is not None and alignment is not None:
+        if osm_polylines is not None:
             current_pose = poses[frame_idx].reshape(3, 4)
-            osm_bev = compute_osm_bev(
-                osm_polylines, alignment, current_pose, frame_idx,
-                grid_size=grid_size,
-                resolution=resolution,
-                x_range=x_range,
-                y_range=y_range
-            )
+            
+            if alignment is None:
+                # Use aligned polylines (already in KITTI coords)
+                osm_bev = compute_osm_bev_aligned(
+                    osm_polylines, current_pose,
+                    grid_size=grid_size,
+                    resolution=resolution,
+                    x_range=x_range,
+                    y_range=y_range
+                )
+            else:
+                # Use raw polylines with GPS alignment
+                osm_bev = compute_osm_bev(
+                    osm_polylines, alignment, current_pose, frame_idx,
+                    grid_size=grid_size,
+                    resolution=resolution,
+                    x_range=x_range,
+                    y_range=y_range
+                )
             if osm_bev.sum() > 0:
                 stats['num_with_osm'] += 1
         else:
@@ -467,6 +656,10 @@ def main():
                        help='Path to GPS alignment .pkl files')
     parser.add_argument('--force_proxy', nargs='+', default=[],
                        help='Sequences to force using trajectory proxy (e.g., 00)')
+    parser.add_argument('--use_aligned_osm', action='store_true', default=True,
+                       help='Use pre-aligned OSM polylines (default: True)')
+    parser.add_argument('--no_aligned_osm', dest='use_aligned_osm', action='store_false',
+                       help='Disable use of pre-aligned OSM polylines')
     
     args = parser.parse_args()
     
@@ -494,7 +687,8 @@ def main():
             seq, data_root, raw_data_root,
             cache_3ch_dir, cache_5ch_dir,
             osm_edges_dir, gps_alignments_dir,
-            use_osm_proxy=use_proxy
+            use_osm_proxy=use_proxy,
+            use_aligned_osm=args.use_aligned_osm
         )
         
         all_stats[seq] = stats

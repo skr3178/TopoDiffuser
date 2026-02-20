@@ -13,6 +13,8 @@ ENV/
 checkpoints/
 data/
 cache/
+history/
+results/
 
 # Model weights
 *.pth
