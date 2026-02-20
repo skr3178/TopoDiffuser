@@ -1,8 +1,8 @@
-![metrics_plot](metrics_plot.png)
+![metrics_plot](images/metrics_plot.png)
 
 
 
-![diffusion_trajectory](diffusion_trajectory.png)
+![diffusion_trajectory](images/diffusion_trajectory.png)
 
 ## Pre-trained Checkpoints
 
@@ -64,7 +64,7 @@ python -u train_diffusion_only.py \
 
 # all sequences
 
-![all_seq_traj](all_kitti_sequences.png)
+![all_seq_traj](images/all_kitti_sequences.png)
 
 # training only on lidar data
 ![Scene_000](results/paper_style_viz_seq02/scene_000_refinement.png)
@@ -94,12 +94,12 @@ python -u train_diffusion_only.py \
 
 # All three modalities for each sequence side by side
 
-![seq_00](paper_three_modalities_seq00.png)
-![seq_01](paper_three_modalities_seq01.png)
-![seq_02](paper_three_modalities_seq02.png)
-![seq_05](paper_three_modalities_seq05.png)
-![seq_07](paper_three_modalities_seq07.png)
-![seq_08](paper_three_modalities_seq08.png)
-![seq_09](paper_three_modalities_seq09.png)
-![seq_10](paper_three_modalities_seq10.png)
+![seq_00](images/paper_three_modalities_seq00.png)
+![seq_01](images/paper_three_modalities_seq01.png)
+![seq_02](images/paper_three_modalities_seq02.png)
+![seq_05](images/paper_three_modalities_seq05.png)
+![seq_07](images/paper_three_modalities_seq07.png)
+![seq_08](images/paper_three_modalities_seq08.png)
+![seq_09](images/paper_three_modalities_seq09.png)
+![seq_10](images/paper_three_modalities_seq10.png)
 
