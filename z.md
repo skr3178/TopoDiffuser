@@ -128,3 +128,6 @@ Summary: OSM Alignment Workflow for Seq 01
      refine_osm_alignment.py         Grid search for optimal rotation                                                           
      utils/osm_alignment.py          latlon_to_utm(), load_oxts_data()                                                          
      utils/osm_polylines_to_bev.py   Polylines → BEV mask conversion          
+
+
+     5 ch does not reach the levels of 3 chanel training. 

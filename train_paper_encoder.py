@@ -6,7 +6,7 @@ Uses the precomputed paper-split BEV data:
   Train: data/paper_split/train/  (3,860 samples — seqs 00,02,05,07)
   Val:   data/paper_split/test/   (2,270 samples — seqs 08,09,10)
 
-Input:  [B, 5, 300, 400] float16 BEV  (height, intensity, density, history, OSM)
+Input:  [B, 4, 300, 400] float16 BEV  (height, intensity, density, OSM)
 Output: [B, 512] conditioning vector  +  [B, 1, 37, 50] road segmentation
 
 Training objective: predict future-trajectory road mask (auxiliary self-supervision).
@@ -171,7 +171,7 @@ def main():
     # ── Model ────────────────────────────────────────────────────────────────
     print('\nBuilding encoder...')
     model = build_full_multimodal_encoder(
-        input_channels=5, conditioning_dim=512
+        input_channels=4, conditioning_dim=512
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())

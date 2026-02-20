@@ -49,20 +49,24 @@ from metrics import compute_trajectory_metrics, MetricsLogger
 # ---------------------------------------------------------------------------
 
 def precompute_from_meta(encoder, encoder_ckpt, meta_path, device,
-                         batch_size=64, traj_mean=None, traj_std=None):
+                         batch_size=64, traj_mean=None, traj_std=None,
+                         cond_mean=None, cond_std=None):
     """
     Run frozen encoder on paper-split BEV files; cache conditioning vectors.
 
-    Trajectories are normalised per-waypoint (zero-mean / unit-variance).
-    If traj_mean / traj_std are None (train set call), they are computed from
-    the data and returned so the caller can reuse them for the val set.
+    Both conditioning vectors and trajectories are normalised per-feature to
+    zero-mean / unit-variance using training-set statistics.
+    If traj_mean/traj_std/cond_mean/cond_std are None (train set call), they
+    are computed from the data and returned for reuse on the val set.
 
     Returns
     -------
-    conditioning : [N, 512] float32 CPU tensor   (encoder output)
-    traj_norm    : [N, 8, 2] float32 CPU tensor  (normalised trajectories)
-    traj_mean    : [8, 2] float32 CPU tensor
-    traj_std     : [8, 2] float32 CPU tensor
+    cond_norm : [N, 512] float32 CPU tensor  (normalised encoder output)
+    traj_norm : [N, 8, 2] float32 CPU tensor (normalised trajectories)
+    traj_mean : [8, 2]  float32 CPU tensor
+    traj_std  : [8, 2]  float32 CPU tensor
+    cond_mean : [512]   float32 CPU tensor
+    cond_std  : [512]   float32 CPU tensor
     """
     # Cache key: meta content + encoder mtime + norm tag
     h = hashlib.md5()
@@ -70,7 +74,7 @@ def precompute_from_meta(encoder, encoder_ckpt, meta_path, device,
         h.update(f.read(1024))
     if os.path.exists(encoder_ckpt):
         h.update(str(os.path.getmtime(encoder_ckpt)).encode())
-    h.update(b'norm_v1')
+    h.update(b'norm_v2')
     tag = h.hexdigest()[:8]
 
     cache_path = (Path('checkpoints/cache_paper')
@@ -79,12 +83,14 @@ def precompute_from_meta(encoder, encoder_ckpt, meta_path, device,
     if cache_path.exists():
         print(f"  Loading cached conditioning from {cache_path}")
         data = torch.load(cache_path, map_location='cpu', weights_only=True)
-        cond      = data['conditioning'].float()
-        traj_norm = data['traj_norm'].float()
-        t_mean    = data['traj_mean'].float()
-        t_std     = data['traj_std'].float()
-        print(f"  {cond.shape[0]} samples loaded from cache")
-        return cond, traj_norm, t_mean, t_std
+        cond_n = data['cond_norm'].float()
+        traj_n = data['traj_norm'].float()
+        t_mean = data['traj_mean'].float()
+        t_std  = data['traj_std'].float()
+        c_mean = data['cond_mean'].float()
+        c_std  = data['cond_std'].float()
+        print(f"  {cond_n.shape[0]} samples loaded from cache")
+        return cond_n, traj_n, t_mean, t_std, c_mean, c_std
 
     # ── encode BEVs ─────────────────────────────────────────────────────────
     print(f"  Precomputing conditioning vectors for {meta_path} ...")
@@ -125,28 +131,39 @@ def precompute_from_meta(encoder, encoder_ckpt, meta_path, device,
     conditioning = torch.cat(all_cond)   # [N, 512]
     trajectories = torch.cat(all_traj)   # [N, 8, 2]
 
-    # ── normalise ────────────────────────────────────────────────────────────
+    # ── normalise trajectories (per-waypoint) ────────────────────────────────
     if traj_mean is None:
-        traj_mean = trajectories.mean(dim=0)              # [8, 2]
-        traj_std  = trajectories.std(dim=0).clamp(min=1e-6)  # [8, 2]
-
+        traj_mean = trajectories.mean(dim=0)                  # [8, 2]
+        traj_std  = trajectories.std(dim=0).clamp(min=1e-6)   # [8, 2]
     traj_norm = (trajectories - traj_mean) / traj_std
 
-    print(f"  Traj mean (per-wp x/y): {traj_mean[:,0].mean():.2f} / {traj_mean[:,1].mean():.2f}")
-    print(f"  Traj std  (per-wp x/y): {traj_std[:,0].mean():.2f}  / {traj_std[:,1].mean():.2f}")
+    # ── normalise conditioning (per-feature) ─────────────────────────────────
+    # The encoder outputs std≈0.19 which makes FiLM scale/shift insensitive.
+    # Normalising each of the 512 features to zero-mean / unit-variance lets
+    # the FiLM layers operate at full sensitivity without any architecture change.
+    if cond_mean is None:
+        cond_mean = conditioning.mean(dim=0)                   # [512]
+        cond_std  = conditioning.std(dim=0).clamp(min=1e-6)   # [512]
+    cond_norm = (conditioning - cond_mean) / cond_std
+
+    print(f"  Traj  mean/std: {traj_mean.mean():.3f} / {traj_std.mean():.3f}")
+    print(f"  Cond  mean/std before norm: {conditioning.mean():.4f} / {conditioning.std():.4f}")
+    print(f"  Cond  mean/std after  norm: {cond_norm.mean():.4f} / {cond_norm.std():.4f}")
 
     # ── save cache ───────────────────────────────────────────────────────────
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
-        'conditioning': conditioning,
-        'traj_norm':    traj_norm,
-        'traj_mean':    traj_mean,
-        'traj_std':     traj_std,
+        'cond_norm': cond_norm,
+        'traj_norm': traj_norm,
+        'traj_mean': traj_mean,
+        'traj_std':  traj_std,
+        'cond_mean': cond_mean,
+        'cond_std':  cond_std,
     }, cache_path)
     print(f"  Precompute done: {len(samples)} samples in {time.time() - t0:.1f}s")
     print(f"  Cached to {cache_path}")
 
-    return conditioning, traj_norm, traj_mean, traj_std
+    return cond_norm, traj_norm, traj_mean, traj_std, cond_mean, cond_std
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +299,7 @@ def main():
     # ── Frozen encoder ───────────────────────────────────────────────────────
     print("\nLoading 5-channel encoder (frozen)...")
     encoder = build_full_multimodal_encoder(
-        input_channels=5, conditioning_dim=512
+        input_channels=4, conditioning_dim=512
     ).to(device)
 
     if args.encoder_ckpt and os.path.exists(args.encoder_ckpt):
@@ -303,23 +320,27 @@ def main():
 
     # ── Precompute conditioning + normalised trajectories ────────────────────
     print("\nPrecomputing train conditioning vectors...")
-    train_cond, train_traj, traj_mean, traj_std = precompute_from_meta(
-        encoder, args.encoder_ckpt, args.train_meta, device,
-        batch_size=args.precompute_batch)
+    train_cond, train_traj, traj_mean, traj_std, cond_mean, cond_std = \
+        precompute_from_meta(encoder, args.encoder_ckpt, args.train_meta, device,
+                             batch_size=args.precompute_batch)
 
     print("\nPrecomputing val conditioning vectors...")
-    val_cond, val_traj, _, _ = precompute_from_meta(
-        encoder, args.encoder_ckpt, args.val_meta, device,
-        batch_size=args.precompute_batch,
-        traj_mean=traj_mean, traj_std=traj_std)   # use train stats
+    val_cond, val_traj, _, _, _, _ = \
+        precompute_from_meta(encoder, args.encoder_ckpt, args.val_meta, device,
+                             batch_size=args.precompute_batch,
+                             traj_mean=traj_mean, traj_std=traj_std,
+                             cond_mean=cond_mean, cond_std=cond_std)
 
     del encoder
     torch.cuda.empty_cache()
     print("\n  Encoder freed from GPU memory")
 
-    # Save normalisation stats alongside checkpoints
+    # Save all normalisation stats for inference use
     norm_stats_path = os.path.join(args.save_dir, 'paper_diffusion_norm_stats.pt')
-    torch.save({'traj_mean': traj_mean, 'traj_std': traj_std}, norm_stats_path)
+    torch.save({
+        'traj_mean': traj_mean, 'traj_std': traj_std,
+        'cond_mean': cond_mean, 'cond_std': cond_std,
+    }, norm_stats_path)
     print(f"  Normalisation stats saved to {norm_stats_path}")
 
     # ── Dataloaders ──────────────────────────────────────────────────────────
@@ -441,6 +462,8 @@ def main():
                 'history':             history,
                 'traj_mean':           traj_mean,
                 'traj_std':            traj_std,
+                'cond_mean':           cond_mean,
+                'cond_std':            cond_std,
             }, os.path.join(args.save_dir, 'paper_diffusion_best.pth'))
             print(f"  Best saved (minADE: {best_minADE:.3f}m)")
 
@@ -452,6 +475,8 @@ def main():
             'history':             history,
             'traj_mean':           traj_mean,
             'traj_std':            traj_std,
+            'cond_mean':           cond_mean,
+            'cond_std':            cond_std,
         }, os.path.join(args.save_dir, 'paper_diffusion_latest.pth'))
 
         # Save history JSON

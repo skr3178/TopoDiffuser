@@ -12,8 +12,7 @@ for the exact train/test split cited in the paper:
 
 Channels:
   0-2  LiDAR  (height, intensity, density)
-  3    History trajectory (past 50 poses, ego-frame binary raster)
-  4    OSM topometric map (pre-aligned polylines, ego-frame binary raster)
+  3    OSM topometric map (pre-aligned polylines, ego-frame binary raster)
 
 BEV grid: 300×400 px @ 0.1 m/px → x∈[-20,20] m, y∈[-10,30] m
 
@@ -132,12 +131,9 @@ def lidar_bev_from_raw(seq, frame_idx, Tr4):
         return np.zeros((3, H, W), dtype=np.float32)
 
     pts = np.fromfile(str(bin_path), dtype=np.float32).reshape(-1, 4)
-    # Near-ground filter in Velodyne frame (z=up): keeps road surface and
-    # vehicles while removing sky returns — matches the existing 3ch BEV cache.
-    z_mask = (pts[:, 2] >= -1.5) & (pts[:, 2] <= 0.5)
-    pts    = pts[z_mask]
-    if len(pts) == 0:
-        return np.zeros((3, H, W), dtype=np.float32)
+    # No Velodyne z-filter — matches 3ch BEVRasterizer which used only XY
+    # bounds and saw ~100% of scan points.  Filtering height here caused the
+    # 5ch model to underperform by excluding the full scene geometry.
 
     pts_h = np.hstack([pts[:, :3], np.ones((len(pts), 1), dtype=np.float32)])
     pts_c = (Tr4 @ pts_h.T).T[:, :3]      # camera frame
@@ -158,22 +154,43 @@ def lidar_bev_from_raw(seq, frame_idx, Tr4):
     py = np.clip(((by - Y_RANGE[0]) / RES).astype(np.int32), 0, H - 1)
 
     bev = np.zeros((3, H, W), dtype=np.float32)
-    np.maximum.at(bev[0], (py, px), bz)          # max height
-    np.add.at(bev[1],     (py, px), rfl)          # sum intensity
-    np.add.at(bev[2],     (py, px), 1.0)          # count
+    cnt = np.zeros((H, W),    dtype=np.float32)
 
-    cnt = bev[2].copy()
+    # ch0 Height: init to -inf so negative heights (ground ≈ -1.73m) are
+    # captured correctly by maximum.at; empty cells reset to 0 then
+    # normalised identically to 3ch BEVRasterizer → empty = 0.429.
+    bev[0, :, :] = -np.inf
+    np.maximum.at(bev[0], (py, px), bz)
+    np.add.at(bev[1],     (py, px), rfl)
+    np.add.at(cnt,        (py, px), 1.0)
+
+    # Reset truly-empty cells to 0 before normalisation (mirrors 3ch).
+    bev[0][bev[0] == -np.inf] = 0.0
+
+    # ch0: normalise with z_range=(-3, 4) — same as 3ch BEVRasterizer.
+    # Applied to ALL cells (including empty-reset-to-0), so empty cells
+    # become (0-(-3))/(4-(-3)) = 0.429, identical to 3ch behaviour.
+    Z_MIN, Z_MAX = -3.0, 4.0
+    bev[0] = np.clip((bev[0] - Z_MIN) / (Z_MAX - Z_MIN), 0.0, 1.0)
+
+    # ch1: mean intensity per cell.
+    # KITTI reflectance is already float32 in [0, 1] — do NOT divide by 255.
+    # The 3ch BEVRasterizer divided by 255 (max_intensity=255 config) which
+    # was a bug carried over from uint8 datasets; 5ch fixes it here.
     pos = cnt > 0
-    bev[1][pos] /= cnt[pos]                       # mean intensity → [0,1]
-    bev[1]      /= 255.0
-    bev[2]       = np.log1p(cnt) / np.log1p(128)  # log-density → [0,1]
+    bev[1][pos] /= cnt[pos]
+    bev[1]       = np.clip(bev[1], 0.0, 1.0)
+
+    # ch2: log-normalised density → [0,1].
+    bev[2] = np.clip(np.log1p(cnt) / np.log1p(128), 0.0, 1.0)
+
     return bev
 
 
 def load_lidar_bev(seq, frame_idx, Tr4):
-    bev = lidar_bev_from_cache(seq, frame_idx)
-    if bev is not None:
-        return bev
+    # Always use raw LiDAR — the 3ch BEV cache has a height normalisation bug
+    # where empty cells get value 0.43 instead of 0, corrupting ch0 for all
+    # sequences that had a cache hit (primarily seq00 and seq02).
     return lidar_bev_from_raw(seq, frame_idx, Tr4)
 
 
@@ -353,10 +370,9 @@ def process_split(name, seq_targets, out_dir, dry_run=False):
 
             if not dry_run:
                 lidar   = load_lidar_bev(seq, frame_idx, Tr4)
-                hist    = compute_history_bev(poses, frame_idx)
                 osm_bev = compute_osm_bev(osm, poses, frame_idx)
-                bev5    = np.concatenate([lidar, hist, osm_bev], axis=0)
-                np.save(str(npy_path), bev5.astype(np.float16))
+                bev4    = np.concatenate([lidar, osm_bev], axis=0)
+                np.save(str(npy_path), bev4.astype(np.float16))
 
                 cache_p = CACHE_3CH / seq / f'{frame_idx:06d}.npy'
                 if cache_p.exists():
