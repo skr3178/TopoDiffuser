@@ -79,19 +79,18 @@ python -u train_diffusion_only.py \
 
   From Table I in the paper:
 
-   Metric    Paper Target   Notes
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   minADE    0.26 m         Minimum Average Displacement Error
-   minFDE    0.56 m         Minimum Final Displacement Error
-   HitRate   0.93           93% of predictions within threshold
-   HD        1.33 m         Hausdorff Distance
+| Metric | Paper Target | Your Best | Gap | Progress |
+|--------|--------------|-----------|-----|----------|
+| minADE ↓ | 0.26 m | 0.883 m | +0.62 m | 70% worse |
+| minFDE ↓ | 0.56 m | - | - | - |
+| HitRate ↑ | 93% | 82.5% | -10.5% | 89% there |
+| HD ↓ | 1.33 m | 1.562 m | +0.23 m | 85% there |
 
-
-   Metric      Paper    Your Best   Gap       Progress
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   minADE ↓    0.26 m   0.883 m     +0.62 m   70% worse
-   HitRate ↑   93%      82.5%       -10.5%    89% there
-   HD ↓        1.33 m   1.562 m     +0.23 m   85% there
+**Notes:**
+- minADE: Minimum Average Displacement Error
+- minFDE: Minimum Final Displacement Error
+- HitRate: Percentage of predictions within threshold
+- HD: Hausdorff Distance
 
 # All three modalities for each sequence side by side
 
